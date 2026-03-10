@@ -53,6 +53,13 @@ CREATE INDEX IF NOT EXISTS idx_entities_user ON entities(user_id);
 CREATE INDEX IF NOT EXISTS idx_relations_user ON relations(user_id);
 CREATE INDEX IF NOT EXISTS idx_relations_source ON relations(source_id);
 CREATE INDEX IF NOT EXISTS idx_relations_target ON relations(target_id);
+
+CREATE TABLE IF NOT EXISTS processed_conversations (
+    user_id      TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    PRIMARY KEY(user_id, content_hash)
+);
 `
 
 type Store struct {
@@ -309,11 +316,44 @@ func (s *Store) DeleteAllForUser(userID string) error {
 	if _, err := tx.Exec("DELETE FROM entities WHERE user_id = ?", userID); err != nil {
 		return err
 	}
+	if _, err := tx.Exec("DELETE FROM processed_conversations WHERE user_id = ?", userID); err != nil {
+		return err
+	}
 
 	return tx.Commit()
 }
 
+// --- Conversation Dedup ---
+
+func (s *Store) ConversationExists(userID, contentHash string) (bool, error) {
+	var count int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM processed_conversations WHERE user_id = ? AND content_hash = ?", userID, contentHash).Scan(&count)
+	return count > 0, err
+}
+
+func (s *Store) MarkConversationProcessed(userID, contentHash string) error {
+	_, err := s.db.Exec("INSERT OR IGNORE INTO processed_conversations (user_id, content_hash, created_at) VALUES (?, ?, ?)", userID, contentHash, now())
+	return err
+}
+
 // --- Entities ---
+
+func (s *Store) GetAllEntities(userID string, limit int) ([]Entity, error) {
+	rows, err := s.db.Query("SELECT id, name, type FROM entities WHERE user_id = ? ORDER BY created_at DESC LIMIT ?", userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var entities []Entity
+	for rows.Next() {
+		var e Entity
+		if err := rows.Scan(&e.ID, &e.Name, &e.Type); err != nil {
+			return nil, err
+		}
+		entities = append(entities, e)
+	}
+	return entities, rows.Err()
+}
 
 func (s *Store) UpsertEntity(userID, name, entityType string) (string, error) {
 	id := newID()

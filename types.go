@@ -36,6 +36,38 @@ type AddResult struct {
 	Tokens  int      `json:"tokens,omitempty"`
 }
 
+// RecallOptions configures the Recall() method.
+type RecallOptions struct {
+	MaxFacts     int `json:"max_facts,omitempty"`
+	MaxRelations int `json:"max_relations,omitempty"`
+}
+
+// RecallResult combines facts and relations into a single response
+// with a pre-formatted summary ready for system prompt injection.
+type RecallResult struct {
+	Facts     []Fact     `json:"facts"`
+	Relations []Relation `json:"relations"`
+	Summary   string     `json:"summary"`
+}
+
+// Entity is a stored named entity (person, org, place, etc.).
+type Entity struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
+// ExportRecord is a single line in a JSONL export file.
+type ExportRecord struct {
+	Type       string `json:"type"`                  // "fact", "entity", "relation"
+	Text       string `json:"text,omitempty"`         // facts
+	Name       string `json:"name,omitempty"`         // entities
+	EntityType string `json:"entity_type,omitempty"`  // entities
+	Source     string `json:"source,omitempty"`       // relations
+	Relation   string `json:"relation,omitempty"`     // relations
+	Target     string `json:"target,omitempty"`       // relations
+}
+
 // Config holds all configuration for a Memory instance.
 type Config struct {
 	DBPath         string // Path to SQLite database file

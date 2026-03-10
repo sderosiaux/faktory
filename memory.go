@@ -1,10 +1,12 @@
 package faktory
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"strings"
 	"sync"
@@ -44,9 +46,16 @@ func (m *Memory) Close() error {
 }
 
 // Add extracts facts and entities from messages, reconciles with existing facts, and stores them.
+// Skips processing if the exact same conversation was already processed for this user.
 func (m *Memory) Add(ctx context.Context, messages []Message, userID string) (*AddResult, error) {
 	if userID == "" {
 		return nil, fmt.Errorf("user_id is required")
+	}
+
+	// Conversation-level dedup: skip if exact same messages already processed
+	contentHash := hashFact(formatMessages(messages))
+	if exists, err := m.store.ConversationExists(userID, contentHash); err == nil && exists {
+		return &AddResult{}, nil
 	}
 
 	var (
@@ -81,6 +90,9 @@ func (m *Memory) Add(ctx context.Context, messages []Message, userID string) (*A
 		return nil, fmt.Errorf("fact pipeline: %w", factErr)
 	}
 
+	// Mark conversation as processed for future dedup
+	_ = m.store.MarkConversationProcessed(userID, contentHash)
+
 	factResult.Tokens += graphTokens
 	return factResult, nil
 }
@@ -105,7 +117,7 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID string
 		return &AddResult{Tokens: totalTokens}, nil
 	}
 
-	// Step 2: For each fact, check hash, embed, and search similar
+	// Step 2: Hash-filter extracted facts
 	type candidateFact struct {
 		text      string
 		hash      string
@@ -113,11 +125,10 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID string
 		similar   []Fact
 	}
 
-	var candidates []candidateFact
+	var textsToEmbed []string
+	var hashes []string
 	for _, factText := range extraction.Facts {
 		h := hashFact(factText)
-
-		// Skip exact duplicates
 		exists, err := m.store.FactExistsByHash(userID, h)
 		if err != nil {
 			return nil, fmt.Errorf("check hash: %w", err)
@@ -125,27 +136,33 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID string
 		if exists {
 			continue
 		}
+		textsToEmbed = append(textsToEmbed, factText)
+		hashes = append(hashes, h)
+	}
 
-		emb, err := m.embedder.Embed(ctx, factText)
-		if err != nil {
-			return nil, fmt.Errorf("embed fact: %w", err)
-		}
+	if len(textsToEmbed) == 0 {
+		return &AddResult{Tokens: totalTokens}, nil
+	}
 
-		similar, err := m.store.SearchFacts(emb, userID, 5)
+	// Step 3: Batch embed all non-duplicate facts
+	embeddings, err := m.embedder.EmbedBatch(ctx, textsToEmbed)
+	if err != nil {
+		return nil, fmt.Errorf("embed facts: %w", err)
+	}
+
+	// Step 4: Search similar for each embedded fact
+	var candidates []candidateFact
+	for i, factText := range textsToEmbed {
+		similar, err := m.store.SearchFacts(embeddings[i], userID, 5)
 		if err != nil {
 			return nil, fmt.Errorf("search similar: %w", err)
 		}
-
 		candidates = append(candidates, candidateFact{
 			text:      factText,
-			hash:      h,
-			embedding: emb,
+			hash:      hashes[i],
+			embedding: embeddings[i],
 			similar:   similar,
 		})
-	}
-
-	if len(candidates) == 0 {
-		return &AddResult{}, nil
 	}
 
 	// Step 3: Collect all similar existing facts, deduplicate (stable order)
@@ -300,6 +317,8 @@ func (m *Memory) addGraph(ctx context.Context, messages []Message, userID string
 
 	// Upsert entities — skip pronouns, use case-insensitive key for dedup
 	entityKeyToID := make(map[string]string)
+	var entNames []string
+	var entIDs []string
 	for _, e := range extraction.Entities {
 		name := strings.TrimSpace(e.Name)
 		if isPronoun(name) || name == "" {
@@ -311,13 +330,20 @@ func (m *Memory) addGraph(ctx context.Context, messages []Message, userID string
 			return tokens, fmt.Errorf("upsert entity %q: %w", name, err)
 		}
 		entityKeyToID[entityKey(name)] = id
+		entNames = append(entNames, name)
+		entIDs = append(entIDs, id)
+	}
 
-		emb, err := m.embedder.Embed(ctx, name)
+	// Batch embed all entity names
+	if len(entNames) > 0 {
+		entEmbs, err := m.embedder.EmbedBatch(ctx, entNames)
 		if err != nil {
-			return tokens, fmt.Errorf("embed entity %q: %w", name, err)
+			return tokens, fmt.Errorf("embed entities: %w", err)
 		}
-		if err := m.store.UpsertEntityEmbedding(id, emb); err != nil {
-			return tokens, fmt.Errorf("store entity embedding %q: %w", name, err)
+		for i, id := range entIDs {
+			if err := m.store.UpsertEntityEmbedding(id, entEmbs[i]); err != nil {
+				return tokens, fmt.Errorf("store entity embedding %q: %w", entNames[i], err)
+			}
 		}
 	}
 
@@ -438,6 +464,218 @@ func (m *Memory) GetAllRelations(ctx context.Context, userID string, limit int) 
 		limit = 100
 	}
 	return m.store.GetAllRelations(userID, limit)
+}
+
+// --- Recall (unified retrieval) ---
+
+// Recall returns facts and relations relevant to a query in a single call.
+// It embeds the query once, runs parallel KNN searches on facts and entity
+// embeddings, and returns a pre-formatted summary for system prompt injection.
+func (m *Memory) Recall(ctx context.Context, query string, userID string, opts *RecallOptions) (*RecallResult, error) {
+	if userID == "" {
+		return nil, fmt.Errorf("user_id is required")
+	}
+
+	maxFacts, maxRels := 10, 10
+	if opts != nil {
+		if opts.MaxFacts > 0 {
+			maxFacts = opts.MaxFacts
+		}
+		if opts.MaxRelations > 0 {
+			maxRels = opts.MaxRelations
+		}
+	}
+
+	// Single embedding for both searches
+	emb, err := m.embedder.Embed(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("embed query: %w", err)
+	}
+
+	var (
+		facts   []Fact
+		rels    []Relation
+		factErr error
+		relErr  error
+		wg      sync.WaitGroup
+	)
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		facts, factErr = m.store.SearchFacts(emb, userID, maxFacts)
+	}()
+	go func() {
+		defer wg.Done()
+		rels, relErr = m.store.SearchRelations(emb, userID, maxRels)
+	}()
+	wg.Wait()
+
+	if factErr != nil {
+		return nil, fmt.Errorf("search facts: %w", factErr)
+	}
+	if relErr != nil {
+		return nil, fmt.Errorf("search relations: %w", relErr)
+	}
+
+	// Pre-format summary for direct system prompt injection
+	var sb strings.Builder
+	if len(facts) > 0 {
+		sb.WriteString("Known facts:\n")
+		for _, f := range facts {
+			sb.WriteString("- ")
+			sb.WriteString(f.Text)
+			sb.WriteString("\n")
+		}
+	}
+	if len(rels) > 0 {
+		if sb.Len() > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString("Relationships:\n")
+		for _, r := range rels {
+			fmt.Fprintf(&sb, "- %s --%s--> %s\n", r.Source, r.Relation, r.Target)
+		}
+	}
+
+	return &RecallResult{
+		Facts:     facts,
+		Relations: rels,
+		Summary:   sb.String(),
+	}, nil
+}
+
+// --- Import / Export ---
+
+// Export writes all facts, entities, and relations for a user as JSONL.
+func (m *Memory) Export(ctx context.Context, userID string, w io.Writer) error {
+	if userID == "" {
+		return fmt.Errorf("user_id is required")
+	}
+
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+
+	facts, err := m.store.GetAllFacts(userID, 100_000)
+	if err != nil {
+		return fmt.Errorf("export facts: %w", err)
+	}
+	for _, f := range facts {
+		if err := enc.Encode(ExportRecord{Type: "fact", Text: f.Text}); err != nil {
+			return err
+		}
+	}
+
+	entities, err := m.store.GetAllEntities(userID, 100_000)
+	if err != nil {
+		return fmt.Errorf("export entities: %w", err)
+	}
+	for _, e := range entities {
+		if err := enc.Encode(ExportRecord{Type: "entity", Name: e.Name, EntityType: e.Type}); err != nil {
+			return err
+		}
+	}
+
+	rels, err := m.store.GetAllRelations(userID, 100_000)
+	if err != nil {
+		return fmt.Errorf("export relations: %w", err)
+	}
+	for _, r := range rels {
+		if err := enc.Encode(ExportRecord{Type: "relation", Source: r.Source, Relation: r.Relation, Target: r.Target}); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// Import reads JSONL records and inserts them for a user. Facts and entities
+// are embedded on import. Existing data is not cleared first.
+func (m *Memory) Import(ctx context.Context, userID string, r io.Reader) error {
+	if userID == "" {
+		return fmt.Errorf("user_id is required")
+	}
+
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+
+	// Collect records by type for batch embedding
+	var factTexts []string
+	var entityRecords []ExportRecord
+	var relationRecords []ExportRecord
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var rec ExportRecord
+		if err := json.Unmarshal(line, &rec); err != nil {
+			return fmt.Errorf("parse record: %w", err)
+		}
+		switch rec.Type {
+		case "fact":
+			factTexts = append(factTexts, rec.Text)
+		case "entity":
+			entityRecords = append(entityRecords, rec)
+		case "relation":
+			relationRecords = append(relationRecords, rec)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("read input: %w", err)
+	}
+
+	// Import facts with batch embedding
+	if len(factTexts) > 0 {
+		embs, err := m.embedder.EmbedBatch(ctx, factTexts)
+		if err != nil {
+			return fmt.Errorf("embed facts: %w", err)
+		}
+		for i, text := range factTexts {
+			if _, err := m.store.InsertFact(userID, text, hashFact(text), embs[i]); err != nil {
+				return fmt.Errorf("insert fact: %w", err)
+			}
+		}
+	}
+
+	// Import entities with batch embedding
+	if len(entityRecords) > 0 {
+		names := make([]string, len(entityRecords))
+		for i, rec := range entityRecords {
+			names[i] = rec.Name
+		}
+		embs, err := m.embedder.EmbedBatch(ctx, names)
+		if err != nil {
+			return fmt.Errorf("embed entities: %w", err)
+		}
+		for i, rec := range entityRecords {
+			id, err := m.store.UpsertEntity(userID, rec.Name, rec.EntityType)
+			if err != nil {
+				return fmt.Errorf("upsert entity: %w", err)
+			}
+			if err := m.store.UpsertEntityEmbedding(id, embs[i]); err != nil {
+				return fmt.Errorf("store entity embedding: %w", err)
+			}
+		}
+	}
+
+	// Import relations (resolve entity names to IDs)
+	for _, rec := range relationRecords {
+		srcID, err := m.store.UpsertEntity(userID, rec.Source, "other")
+		if err != nil {
+			return fmt.Errorf("upsert source: %w", err)
+		}
+		tgtID, err := m.store.UpsertEntity(userID, rec.Target, "other")
+		if err != nil {
+			return fmt.Errorf("upsert target: %w", err)
+		}
+		if err := m.store.UpsertRelation(userID, srcID, rec.Relation, tgtID); err != nil {
+			return fmt.Errorf("upsert relation: %w", err)
+		}
+	}
+
+	return nil
 }
 
 // --- Helpers ---

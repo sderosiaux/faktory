@@ -2,5 +2,6 @@
 *.db-wal
 *.db-shm
 .env
-faktory
+/faktory
+/faktory-mcp
 dist/
