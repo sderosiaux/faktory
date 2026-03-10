@@ -140,28 +140,31 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID string
 		return &AddResult{}, nil
 	}
 
-	// Step 3: Collect all similar existing facts, deduplicate
+	// Step 3: Collect all similar existing facts, deduplicate (stable order)
 	existingByID := make(map[string]Fact)
+	var existingOrder []string
 	for _, c := range candidates {
 		for _, f := range c.similar {
-			existingByID[f.ID] = f
+			if _, seen := existingByID[f.ID]; !seen {
+				existingByID[f.ID] = f
+				existingOrder = append(existingOrder, f.ID)
+			}
 		}
 	}
 
-	// Step 4: Map UUIDs to sequential integers
+	// Step 4: Map UUIDs to sequential integers (deterministic via existingOrder)
 	idToInt := make(map[string]string)
 	intToID := make(map[string]string)
-	idx := 0
-	for id := range existingByID {
+	for idx, id := range existingOrder {
 		intStr := fmt.Sprintf("%d", idx)
 		idToInt[id] = intStr
 		intToID[intStr] = id
-		idx++
 	}
 
 	// Build reconciliation prompt input
 	var existingLines []string
-	for id, f := range existingByID {
+	for _, id := range existingOrder {
+		f := existingByID[id]
 		existingLines = append(existingLines, fmt.Sprintf("id: %s, text: %s", idToInt[id], f.Text))
 	}
 
@@ -180,14 +183,25 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID string
 		return nil, fmt.Errorf("reconcile: %w", err)
 	}
 
+	// Build a lookup from candidate text → embedding to avoid re-embedding ADDs
+	candidateEmbs := make(map[string][]float32, len(candidates))
+	for _, c := range candidates {
+		candidateEmbs[c.text] = c.embedding
+	}
+
 	// Step 6: Execute actions
 	result := &AddResult{}
 	for _, action := range reconciliation.Memory {
 		switch action.Event {
 		case "ADD":
-			emb, err := m.embedder.Embed(ctx, action.Text)
-			if err != nil {
-				return nil, fmt.Errorf("embed new fact: %w", err)
+			// Reuse candidate embedding if text matches, otherwise re-embed
+			emb, ok := candidateEmbs[action.Text]
+			if !ok {
+				var err error
+				emb, err = m.embedder.Embed(ctx, action.Text)
+				if err != nil {
+					return nil, fmt.Errorf("embed new fact: %w", err)
+				}
 			}
 			id, err := m.store.InsertFact(userID, action.Text, hashFact(action.Text), emb)
 			if err != nil {

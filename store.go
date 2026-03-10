@@ -207,6 +207,13 @@ func (s *Store) SearchFacts(queryEmbedding []float32, userID string, limit int) 
 		return nil, err
 	}
 
+	// Over-fetch from vec0 because KNN runs globally (no user_id filter inside
+	// the virtual table). The JOIN + WHERE filters to the target user afterward.
+	kFetch := limit * 20
+	if kFetch > 200 {
+		kFetch = 200
+	}
+
 	rows, err := s.db.Query(`
 		SELECT f.id, f.user_id, f.text, f.hash, f.created_at, f.updated_at, e.distance
 		FROM fact_embeddings e
@@ -215,7 +222,8 @@ func (s *Store) SearchFacts(queryEmbedding []float32, userID string, limit int) 
 		  AND k = ?
 		  AND f.user_id = ?
 		ORDER BY e.distance
-	`, string(embJSON), limit, userID)
+		LIMIT ?
+	`, string(embJSON), kFetch, userID, limit)
 	if err != nil {
 		return nil, err
 	}

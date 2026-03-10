@@ -1,6 +1,7 @@
 package faktory
 
 import (
+	"fmt"
 	"os"
 	"testing"
 )
@@ -153,6 +154,35 @@ func TestSearchFacts(t *testing.T) {
 	// First result should be "likes pizza" (closer to query)
 	if results[0].Text != "likes pizza" {
 		t.Errorf("first result = %q, want %q", results[0].Text, "likes pizza")
+	}
+}
+
+func TestSearchFactsUserIsolation(t *testing.T) {
+	s := tempStore(t, 4)
+
+	// Insert many bob facts with identical vectors to crowd out KNN results
+	for i := 0; i < 30; i++ {
+		s.InsertFact("bob", fmt.Sprintf("bob fact %d", i), fmt.Sprintf("bob_%d", i), []float32{1, 0, 0, 0})
+	}
+	// Alice has one fact with the same vector direction
+	s.InsertFact("alice", "alice fact", "alice_1", []float32{1, 0, 0, 0})
+
+	// Search for alice — should find her fact despite bob dominating the KNN
+	results, err := s.SearchFacts([]float32{1, 0, 0, 0}, "alice", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 alice result, got %d", len(results))
+	}
+	if results[0].Text != "alice fact" {
+		t.Errorf("result = %q, want %q", results[0].Text, "alice fact")
+	}
+	// Must not contain any bob facts
+	for _, r := range results {
+		if r.UserID != "alice" {
+			t.Errorf("got result for user %q, want alice only", r.UserID)
+		}
 	}
 }
 
