@@ -12,7 +12,9 @@ Rules:
 - Use the same language as the input.
 - No opinions about the conversation. No meta-commentary.
 - If nothing worth remembering, return an empty list.
-- Focus on: preferences, personal details, plans, professional info, relationships.`
+- Focus on: preferences, personal details, plans, professional info, relationships.
+- When a user mentions switching or changing something (e.g., "switched from X to Y"), extract the NEW state as a standalone fact (e.g., "Uses Y"), not the transition.
+- Extract ALL facts, even minor ones mentioned alongside bigger news. Do not skip secondary details.`
 
 const reconcilePrompt = `You manage a fact store. Given existing facts and newly extracted facts, decide what to do with each.
 
@@ -31,14 +33,27 @@ Rules:
 
 const entityExtractionPrompt = `Extract entities and their relationships from the conversation.
 
-Entity types: person, organization, place, product, event, concept, other.
-Relations: use short snake_case verbs (works_at, lives_in, likes, owns, married_to, ...).
+Entity types (use exactly one): person, organization, place, product, event, concept, other.
+
+Relation types (use exactly one):
+  People: knows, friend_of, sibling_of, parent_of, child_of, married_to, partner_of, colleague_of, mentored_by
+  Work: works_at, manages, reports_to, founded, member_of, hired_by, contracted_by
+  Location: lives_in, born_in, located_in, moved_to, visited, from
+  Education: studied_at, graduated_from, teaches_at
+  Ownership: owns, uses, created, built, authored, developed
+  Preference: likes, dislikes, prefers, interested_in, allergic_to
+  Language: speaks, reads, writes
+  General: part_of, related_to, instance_of, has, wants, plans_to
+
+If none of the above fits, pick the closest one. Do NOT invent new relation types.
 
 Rules:
 - Only extract what is explicitly stated or strongly implied.
 - Do not invent relations.
 - Normalize entity names: capitalize proper nouns.
-- Use the same language as the input for entity names.`
+- Use the same language as the input for entity names.
+- Be thorough: extract ALL entities and relations mentioned, including pets, allergies, tools, and hobbies.
+- Each person-entity connection deserves its own relation (e.g., "I have a cat named Mochi" → person owns Mochi).`
 
 // --- Response types ---
 
@@ -118,7 +133,7 @@ var entityExtractionSchema = json.RawMessage(`{
         "type": "object",
         "properties": {
           "name": {"type": "string"},
-          "type": {"type": "string"}
+          "type": {"type": "string", "enum": ["person", "organization", "place", "product", "event", "concept", "other"]}
         },
         "required": ["name", "type"],
         "additionalProperties": false
@@ -130,7 +145,16 @@ var entityExtractionSchema = json.RawMessage(`{
         "type": "object",
         "properties": {
           "source": {"type": "string"},
-          "relation": {"type": "string"},
+          "relation": {"type": "string", "enum": [
+            "knows", "friend_of", "sibling_of", "parent_of", "child_of", "married_to", "partner_of", "colleague_of", "mentored_by",
+            "works_at", "manages", "reports_to", "founded", "member_of", "hired_by", "contracted_by",
+            "lives_in", "born_in", "located_in", "moved_to", "visited", "from",
+            "studied_at", "graduated_from", "teaches_at",
+            "owns", "uses", "created", "built", "authored", "developed",
+            "likes", "dislikes", "prefers", "interested_in", "allergic_to",
+            "speaks", "reads", "writes",
+            "part_of", "related_to", "instance_of", "has", "wants", "plans_to"
+          ]},
           "target": {"type": "string"}
         },
         "required": ["source", "relation", "target"],
