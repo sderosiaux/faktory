@@ -1,5 +1,15 @@
 package faktory
 
+import (
+	"io"
+	"log/slog"
+)
+
+// nopLogger returns a logger that discards all output.
+func nopLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
 // Message represents a single message in a conversation.
 type Message struct {
 	Role    string `json:"role"` // "user", "assistant", "system"
@@ -72,12 +82,13 @@ type ExportRecord struct {
 
 // Config holds all configuration for a Memory instance.
 type Config struct {
-	DBPath         string // Path to SQLite database file
-	LLMBaseURL     string // OpenAI-compatible API base URL (e.g., "https://api.openai.com/v1")
-	LLMAPIKey      string // API key for LLM
-	LLMModel       string // Model name for chat completions (e.g., "gpt-4o-mini")
-	EmbedModel     string // Model name for embeddings (e.g., "text-embedding-3-small")
-	EmbedDimension int    // Embedding vector dimension (e.g., 1536)
+	DBPath         string      // Path to SQLite database file
+	LLMBaseURL     string      // OpenAI-compatible API base URL (e.g., "https://api.openai.com/v1")
+	LLMAPIKey      string      // API key for LLM
+	LLMModel       string      // Model name for chat completions (e.g., "gpt-4o-mini")
+	EmbedModel     string      // Model name for embeddings (e.g., "text-embedding-3-small")
+	EmbedDimension int         // Embedding vector dimension (e.g., 1536)
+	Logger         *slog.Logger // Structured logger (default: silent)
 }
 
 func (c Config) withDefaults() Config {
@@ -95,6 +106,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.EmbedDimension == 0 {
 		c.EmbedDimension = 1536
+	}
+	if c.Logger == nil {
+		c.Logger = nopLogger()
 	}
 	return c
 }

@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"strings"
 	"sync"
 )
@@ -17,6 +17,7 @@ type Memory struct {
 	llm      *LLM
 	embedder *Embedder
 	cfg      Config
+	log      *slog.Logger
 }
 
 // New creates a new Memory instance from config.
@@ -36,6 +37,7 @@ func New(cfg Config) (*Memory, error) {
 		llm:      llm,
 		embedder: embedder,
 		cfg:      cfg,
+		log:      cfg.Logger,
 	}, nil
 }
 
@@ -82,7 +84,7 @@ func (m *Memory) Add(ctx context.Context, messages []Message, userID string) (*A
 	wg.Wait()
 
 	if graphErr != nil {
-		log.Printf("graph pipeline error (non-fatal): %v", graphErr)
+		m.log.Warn("graph pipeline error", "err", graphErr)
 	}
 
 	if factErr != nil {
@@ -99,7 +101,7 @@ func (m *Memory) Add(ctx context.Context, messages []Message, userID string) (*A
 // --- Fact Pipeline ---
 
 func (m *Memory) addFacts(ctx context.Context, messages []Message, userID string) (*AddResult, error) {
-	messages = truncateMessages(messages, maxMessageChars)
+	messages = truncateMessages(m.log, messages, maxMessageChars)
 	userContent := formatMessages(messages)
 
 	totalTokens := 0
@@ -270,9 +272,9 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID string
 	// Cleanup stale relations after fact updates/deletes
 	if len(deletedTexts) > 0 {
 		if cleaned, err := m.store.CleanupStaleRelations(userID, deletedTexts); err != nil {
-			log.Printf("stale relation cleanup error (non-fatal): %v", err)
+			m.log.Warn("stale relation cleanup error", "err", err)
 		} else if cleaned > 0 {
-			log.Printf("cleaned %d stale relations", cleaned)
+			m.log.Info("cleaned stale relations", "count", cleaned)
 		}
 	}
 
@@ -283,7 +285,7 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID string
 // --- Graph Pipeline ---
 
 func (m *Memory) addGraph(ctx context.Context, messages []Message, userID string) (int, error) {
-	messages = truncateMessages(messages, maxMessageChars)
+	messages = truncateMessages(m.log, messages, maxMessageChars)
 	userContent := formatUserMessages(messages)
 
 	var extraction EntityExtractionResult
@@ -295,10 +297,10 @@ func (m *Memory) addGraph(ctx context.Context, messages []Message, userID string
 	// Validate extraction — retry once on errors, log warnings
 	issues := validateExtraction(&extraction)
 	if len(issues.warnings) > 0 {
-		log.Printf("entity extraction warnings: %s", strings.Join(issues.warnings, "; "))
+		m.log.Warn("entity extraction warnings", "issues", strings.Join(issues.warnings, "; "))
 	}
 	if len(issues.errors) > 0 {
-		log.Printf("entity extraction has %d errors, requesting correction: %s", len(issues.errors), strings.Join(issues.errors, "; "))
+		m.log.Warn("entity extraction errors, requesting correction", "count", len(issues.errors), "errors", strings.Join(issues.errors, "; "))
 
 		previousJSON, _ := json.Marshal(extraction)
 		correction := fmt.Sprintf(
@@ -319,10 +321,10 @@ func (m *Memory) addGraph(ctx context.Context, messages []Message, userID string
 				extraction = corrected
 			}
 			if len(newIssues.errors) > 0 {
-				log.Printf("correction still has %d errors (down from %d), proceeding with best result", len(newIssues.errors), len(issues.errors))
+				m.log.Warn("correction still has errors", "remaining", len(newIssues.errors), "original", len(issues.errors))
 			}
 		} else {
-			log.Printf("correction request failed: %v, using original extraction", retryErr)
+			m.log.Warn("correction request failed, using original", "err", retryErr)
 		}
 	}
 
@@ -571,7 +573,7 @@ func (m *Memory) Recall(ctx context.Context, query string, userID string, opts *
 	if opts != nil && opts.IncludeProfile {
 		profile, err := m.Profile(ctx, userID)
 		if err != nil {
-			log.Printf("profile generation error (non-fatal): %v", err)
+			m.log.Warn("profile generation error", "err", err)
 		} else if profile != "" {
 			sb.WriteString("User profile:\n")
 			sb.WriteString(profile)

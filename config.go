@@ -2,7 +2,6 @@ package faktory
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 
@@ -24,13 +23,20 @@ func LoadConfig() Config {
 	for _, path := range configPaths() {
 		if _, err := os.Stat(path); err == nil {
 			if _, err := toml.DecodeFile(path, &tc); err != nil {
-				log.Printf("warning: failed to parse %s: %v", path, err)
+				continue
 			}
 			break
 		}
 	}
 
-	cfg := Config(tc)
+	cfg := Config{
+		DBPath:         tc.DBPath,
+		LLMBaseURL:     tc.LLMBaseURL,
+		LLMAPIKey:      tc.LLMAPIKey,
+		LLMModel:       tc.LLMModel,
+		EmbedModel:     tc.EmbedModel,
+		EmbedDimension: tc.EmbedDimension,
+	}
 
 	// Env vars override TOML
 	if v := os.Getenv("FAKTORY_DB"); v != "" {

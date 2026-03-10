@@ -3,7 +3,7 @@ package faktory
 import (
 	"crypto/sha256"
 	"fmt"
-	"log"
+	"log/slog"
 	"math"
 	"sort"
 	"strings"
@@ -37,8 +37,8 @@ func applyDecay(facts []Fact) {
 }
 
 // truncateMessages keeps the last N messages that fit within maxChars.
-// Always keeps at least 1 message. Logs a warning if truncation occurs.
-func truncateMessages(messages []Message, maxChars int) []Message {
+// Always keeps at least 1 message.
+func truncateMessages(log *slog.Logger, messages []Message, maxChars int) []Message {
 	total := 0
 	for _, m := range messages {
 		total += len(m.Role) + len(m.Content) + 3 // "role: content\n"
@@ -57,8 +57,7 @@ func truncateMessages(messages []Message, maxChars int) []Message {
 		budget -= cost
 		start = i
 	}
-	log.Printf("truncating conversation from %d to %d messages (%d chars exceeded %d limit)",
-		len(messages), len(messages)-start, total, maxChars)
+	log.Warn("truncating conversation", "from", len(messages), "to", len(messages)-start, "chars", total, "limit", maxChars)
 	return messages[start:]
 }
 

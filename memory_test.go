@@ -5,6 +5,8 @@ import (
 	"testing"
 )
 
+var testLog = nopLogger()
+
 func TestHashFact(t *testing.T) {
 	h1 := hashFact("likes pizza")
 	h2 := hashFact("likes pizza")
@@ -36,7 +38,7 @@ func TestTruncateMessages(t *testing.T) {
 			{Role: "user", Content: "Hello"},
 			{Role: "assistant", Content: "Hi"},
 		}
-		got := truncateMessages(msgs, 1000)
+		got := truncateMessages(testLog, msgs,1000)
 		if len(got) != 2 {
 			t.Errorf("expected 2 messages, got %d", len(got))
 		}
@@ -48,7 +50,7 @@ func TestTruncateMessages(t *testing.T) {
 			msgs[i] = Message{Role: "user", Content: strings.Repeat("x", 100)}
 		}
 		// Each message is ~107 chars ("user: " + 100 + "\n"). 3 messages ≈ 321 chars.
-		got := truncateMessages(msgs, 350)
+		got := truncateMessages(testLog, msgs,350)
 		if len(got) > 3 {
 			t.Errorf("expected <=3 messages, got %d", len(got))
 		}
@@ -61,7 +63,7 @@ func TestTruncateMessages(t *testing.T) {
 		msgs := []Message{
 			{Role: "user", Content: strings.Repeat("x", 1000)},
 		}
-		got := truncateMessages(msgs, 10)
+		got := truncateMessages(testLog, msgs,10)
 		if len(got) != 1 {
 			t.Errorf("expected 1 message, got %d", len(got))
 		}
@@ -73,7 +75,7 @@ func TestTruncateMessages(t *testing.T) {
 			{Role: "user", Content: "second"},
 			{Role: "user", Content: "third"},
 		}
-		got := truncateMessages(msgs, 50)
+		got := truncateMessages(testLog, msgs,50)
 		if len(got) > 0 && got[len(got)-1].Content != "third" {
 			t.Errorf("last message should be 'third', got %q", got[len(got)-1].Content)
 		}
