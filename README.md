@@ -235,7 +235,7 @@ Tools: `memory_add`, `memory_recall`, `memory_search`, `memory_profile`, `memory
 - **Lazy profiles** — Generated on read, cached until facts change. No LLM calls on Add()
 - **Silent by default** — No logging unless you pass a `*slog.Logger`. Libraries shouldn't pollute stderr
 - **Custom prompts over plugins** — Override extraction/reconciliation prompts via Config for domain tuning. No plugin system needed
-- **Namespace scoping** — Optional per-call `WithNamespace()` adds a second isolation dimension. Empty namespace = backward compatible
+- **Namespace scoping** — Per-call `WithNamespace()` adds a second isolation dimension beyond user_id
 
 ## Testing
 
