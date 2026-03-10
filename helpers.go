@@ -13,22 +13,17 @@ import (
 // maxMessageChars is the approximate character budget for messages (~25K tokens).
 const maxMessageChars = 100_000
 
-// Decay constants
-const (
-	decayAlpha = 0.01 // age decay rate: ~50% at 100 days untouched
-	decayBeta  = 0.1  // access boost: mild boost for frequently accessed facts
-)
-
 // applyDecay re-scores facts using temporal decay and access frequency, then sorts descending.
-func applyDecay(facts []Fact) {
+// alpha controls age decay rate (higher = faster decay). beta controls access boost (higher = stronger boost).
+func applyDecay(facts []Fact, alpha, beta float64) {
 	now := time.Now()
 	for i := range facts {
 		ageDays := 0.0
 		if t, err := time.Parse(time.RFC3339, facts[i].CreatedAt); err == nil {
 			ageDays = now.Sub(t).Hours() / 24
 		}
-		ageFactor := 1.0 / (1.0 + decayAlpha*ageDays)
-		accessFactor := 1.0 + decayBeta*math.Log1p(float64(facts[i].AccessCount))
+		ageFactor := 1.0 / (1.0 + alpha*ageDays)
+		accessFactor := 1.0 + beta*math.Log1p(float64(facts[i].AccessCount))
 		facts[i].Score = facts[i].Score * ageFactor * accessFactor
 	}
 	sort.Slice(facts, func(i, j int) bool {

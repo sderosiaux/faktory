@@ -163,6 +163,9 @@ faktory.Config{
 
     DisableGraph: false, // skip entity/relation extraction (saves 1 LLM call per Add)
 
+    DecayAlpha: 0.01, // age decay rate (higher = older facts decay faster)
+    DecayBeta:  0.1,  // access boost rate (higher = frequent access boosts more)
+
     // Custom prompts — override LLM system prompts for domain-specific tuning
     PromptFactExtraction:   "",  // fact extraction (empty = default)
     PromptReconciliation:   "",  // fact reconciliation (empty = default)
@@ -232,7 +235,8 @@ Tools: `memory_add`, `memory_recall`, `memory_search`, `memory_profile`, `memory
 - **OpenAI-compatible only** — One HTTP client covers every provider
 - **3 LLM calls per Add()** — Extract + reconcile + graph. This is the minimum for reliable memory
 - **Integer ID mapping** — UUIDs mapped to sequential ints before sending to the reconciliation LLM. Prevents hallucinated IDs
-- **Opinionated decay** — α=0.01, β=0.1. Hardcoded. Recent and frequently accessed facts rank higher
+- **Configurable decay** — α=0.01, β=0.1 defaults. Override via `DecayAlpha`/`DecayBeta` in Config. Recent and frequently accessed facts rank higher
+- **KNN over-fetch** — sqlite-vec KNN is global (no per-user partition). We over-fetch 20x then post-filter by user_id. Works well up to ~50K total facts; beyond that, consider sharding by user into separate DBs
 - **Conservative cleanup** — Relations are only pruned when their entity disappears from all facts
 - **Lazy profiles** — Generated on read, cached until facts change. No LLM calls on Add()
 - **Silent by default** — No logging unless you pass a `*slog.Logger`. Libraries shouldn't pollute stderr

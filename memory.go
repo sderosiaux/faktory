@@ -122,6 +122,11 @@ func (m *Memory) Add(ctx context.Context, messages []Message, userID string, opt
 	_ = m.store.MarkConversationProcessed(userID, o.namespace, contentHash)
 
 	factResult.Tokens += graphTokens
+
+	if count, err := m.store.CountFacts(userID, o.namespace); err == nil {
+		factResult.TotalFacts = count
+	}
+
 	return factResult, nil
 }
 
@@ -406,7 +411,7 @@ func (m *Memory) Search(ctx context.Context, query string, userID string, limit 
 		return nil, err
 	}
 
-	applyDecay(facts)
+	applyDecay(facts, m.cfg.DecayAlpha, m.cfg.DecayBeta)
 	if len(facts) > limit {
 		facts = facts[:limit]
 	}
@@ -604,7 +609,7 @@ func (m *Memory) Recall(ctx context.Context, query string, userID string, opts *
 		return nil, fmt.Errorf("search entity IDs: %w", relErr)
 	}
 
-	applyDecay(facts)
+	applyDecay(facts, m.cfg.DecayAlpha, m.cfg.DecayBeta)
 	if len(facts) > maxFacts {
 		facts = facts[:maxFacts]
 	}

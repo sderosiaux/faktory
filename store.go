@@ -352,6 +352,13 @@ func (s *Store) BumpAccess(ids []string) error {
 	return tx.Commit()
 }
 
+// CountFacts returns the total number of facts for a user+namespace.
+func (s *Store) CountFacts(userID, namespace string) (int, error) {
+	var count int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM facts WHERE user_id = ? AND namespace = ?", userID, namespace).Scan(&count)
+	return count, err
+}
+
 func (s *Store) GetAllFacts(userID, namespace string, limit int) ([]Fact, error) {
 	rows, err := s.db.Query("SELECT id, user_id, text, hash, created_at, updated_at, access_count FROM facts WHERE user_id = ? AND namespace = ? ORDER BY created_at DESC LIMIT ?", userID, namespace, limit)
 	if err != nil {

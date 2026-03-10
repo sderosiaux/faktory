@@ -62,6 +62,7 @@ type AddResult struct {
 	Deleted            []string      `json:"deleted,omitempty"`
 	Noops              int           `json:"noops,omitempty"`
 	Tokens             int           `json:"tokens,omitempty"`
+	TotalFacts         int           `json:"total_facts,omitempty"`
 	GraphErrors        []string      `json:"graph_errors,omitempty"`
 	ExtractedFacts     []string      `json:"extracted_facts,omitempty"`
 	ExtractedEntities  []EntityRef   `json:"extracted_entities,omitempty"`
@@ -161,6 +162,9 @@ type Config struct {
 
 	DisableGraph bool // Skip entity/relation extraction in Add() (saves 1 LLM call)
 
+	DecayAlpha float64 // Age decay rate (default: 0.01). Higher = faster decay of old facts.
+	DecayBeta  float64 // Access boost rate (default: 0.1). Higher = stronger boost for frequently accessed facts.
+
 	PromptFactExtraction   string // Override fact extraction system prompt
 	PromptReconciliation   string // Override reconciliation system prompt
 	PromptEntityExtraction string // Override entity extraction system prompt
@@ -197,6 +201,12 @@ func (c Config) withDefaults() Config {
 	}
 	if c.EmbedDimension == 0 {
 		c.EmbedDimension = 256
+	}
+	if c.DecayAlpha == 0 {
+		c.DecayAlpha = 0.01
+	}
+	if c.DecayBeta == 0 {
+		c.DecayBeta = 0.1
 	}
 	if c.Logger == nil {
 		c.Logger = nopLogger()
