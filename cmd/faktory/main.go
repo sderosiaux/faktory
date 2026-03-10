@@ -239,6 +239,7 @@ func main() {
 
 	// --- recall ---
 	var recallMaxFacts, recallMaxRels int
+	var recallProfile bool
 	recallCmd := &cobra.Command{
 		Use:   "recall [query]",
 		Short: "Retrieve relevant facts and relations in one call",
@@ -253,7 +254,11 @@ func main() {
 			}
 			defer mem.Close()
 
-			opts := &faktory.RecallOptions{MaxFacts: recallMaxFacts, MaxRelations: recallMaxRels}
+			opts := &faktory.RecallOptions{
+				MaxFacts:       recallMaxFacts,
+				MaxRelations:   recallMaxRels,
+				IncludeProfile: recallProfile,
+			}
 			result, err := mem.Recall(context.Background(), strings.Join(args, " "), user, opts)
 			if err != nil {
 				return err
@@ -269,6 +274,34 @@ func main() {
 	}
 	recallCmd.Flags().IntVar(&recallMaxFacts, "max-facts", 10, "Max facts to return")
 	recallCmd.Flags().IntVar(&recallMaxRels, "max-relations", 10, "Max relations to return")
+	recallCmd.Flags().BoolVar(&recallProfile, "profile", false, "Include generated user profile in output")
+
+	// --- profile ---
+	profileCmd := &cobra.Command{
+		Use:   "profile",
+		Short: "Generate a user profile summary from stored facts",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if user == "" {
+				return fmt.Errorf("--user is required")
+			}
+			mem, err := newMemory()
+			if err != nil {
+				return err
+			}
+			defer mem.Close()
+
+			profile, err := mem.Profile(context.Background(), user)
+			if err != nil {
+				return err
+			}
+			if profile == "" {
+				fmt.Println("(no facts stored for this user)")
+				return nil
+			}
+			fmt.Println(profile)
+			return nil
+		},
+	}
 
 	// --- export ---
 	exportCmd := &cobra.Command{
@@ -317,7 +350,7 @@ func main() {
 		},
 	}
 
-	root.AddCommand(addCmd, searchCmd, factsCmd, relCmd, deleteCmd, deleteAllCmd, getCmd, updateCmd, recallCmd, exportCmd, importCmd)
+	root.AddCommand(addCmd, searchCmd, factsCmd, relCmd, deleteCmd, deleteAllCmd, getCmd, updateCmd, recallCmd, exportCmd, importCmd, profileCmd)
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)

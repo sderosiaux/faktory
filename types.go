@@ -8,13 +8,14 @@ type Message struct {
 
 // Fact is a stored atomic fact about a user.
 type Fact struct {
-	ID        string  `json:"id"`
-	UserID    string  `json:"user_id"`
-	Text      string  `json:"text"`
-	Hash      string  `json:"hash,omitempty"`
-	Score     float64 `json:"score,omitempty"`
-	CreatedAt string  `json:"created_at"`
-	UpdatedAt string  `json:"updated_at"`
+	ID          string  `json:"id"`
+	UserID      string  `json:"user_id"`
+	Text        string  `json:"text"`
+	Hash        string  `json:"hash,omitempty"`
+	Score       float64 `json:"score,omitempty"`
+	CreatedAt   string  `json:"created_at"`
+	UpdatedAt   string  `json:"updated_at"`
+	AccessCount int     `json:"access_count,omitempty"`
 }
 
 // Relation is a stored entity-relation-entity triplet.
@@ -38,8 +39,9 @@ type AddResult struct {
 
 // RecallOptions configures the Recall() method.
 type RecallOptions struct {
-	MaxFacts     int `json:"max_facts,omitempty"`
-	MaxRelations int `json:"max_relations,omitempty"`
+	MaxFacts       int  `json:"max_facts,omitempty"`
+	MaxRelations   int  `json:"max_relations,omitempty"`
+	IncludeProfile bool `json:"include_profile,omitempty"`
 }
 
 // RecallResult combines facts and relations into a single response

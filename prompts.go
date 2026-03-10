@@ -68,6 +68,21 @@ resolved_text: "Alice has a cat named Mochi. Alice's boyfriend Tom is allergic t
 entities: Alice (person), Mochi (other), Tom (person), Figma (organization), Python (product), Rust (product)
 relations: Alice owns Mochi, Alice partner_of Tom, Tom allergic_to cats, Tom works_at Figma, Alice uses Python, Alice uses Rust`
 
+const profileGenerationPrompt = `Summarize everything known about this user into a concise profile.
+
+Group by: personal details, work/education, preferences, relationships, plans.
+Skip empty groups. Use natural prose, not bullet points.
+Be concise — under 300 words. Use the same language as the facts.`
+
+var profileSchema = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "profile": {"type": "string"}
+  },
+  "required": ["profile"],
+  "additionalProperties": false
+}`)
+
 // --- Response types ---
 
 type FactExtractionResult struct {

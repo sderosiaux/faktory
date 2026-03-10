@@ -3,7 +3,6 @@ package faktory
 import (
 	"bufio"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -100,7 +99,6 @@ func (m *Memory) Add(ctx context.Context, messages []Message, userID string) (*A
 // --- Fact Pipeline ---
 
 func (m *Memory) addFacts(ctx context.Context, messages []Message, userID string) (*AddResult, error) {
-	// Step 1: Extract facts from conversation
 	messages = truncateMessages(messages, maxMessageChars)
 	userContent := formatMessages(messages)
 
@@ -117,7 +115,7 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID string
 		return &AddResult{Tokens: totalTokens}, nil
 	}
 
-	// Step 2: Hash-filter extracted facts
+	// Hash-filter extracted facts
 	type candidateFact struct {
 		text      string
 		hash      string
@@ -144,13 +142,13 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID string
 		return &AddResult{Tokens: totalTokens}, nil
 	}
 
-	// Step 3: Batch embed all non-duplicate facts
+	// Batch embed all non-duplicate facts
 	embeddings, err := m.embedder.EmbedBatch(ctx, textsToEmbed)
 	if err != nil {
 		return nil, fmt.Errorf("embed facts: %w", err)
 	}
 
-	// Step 4: Search similar for each embedded fact
+	// Search similar for each embedded fact
 	var candidates []candidateFact
 	for i, factText := range textsToEmbed {
 		similar, err := m.store.SearchFacts(embeddings[i], userID, 5)
@@ -165,7 +163,7 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID string
 		})
 	}
 
-	// Step 3: Collect all similar existing facts, deduplicate (stable order)
+	// Collect all similar existing facts, deduplicate (stable order)
 	existingByID := make(map[string]Fact)
 	var existingOrder []string
 	for _, c := range candidates {
@@ -177,7 +175,7 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID string
 		}
 	}
 
-	// Step 4: Map UUIDs to sequential integers (deterministic via existingOrder)
+	// Map UUIDs to sequential integers (deterministic via existingOrder)
 	idToInt := make(map[string]string)
 	intToID := make(map[string]string)
 	for idx, id := range existingOrder {
@@ -186,7 +184,6 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID string
 		intToID[intStr] = id
 	}
 
-	// Build reconciliation prompt input
 	var existingLines []string
 	for _, id := range existingOrder {
 		f := existingByID[id]
@@ -202,7 +199,7 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID string
 		strings.Join(existingLines, "\n"),
 		strings.Join(newLines, "\n"))
 
-	// Step 5: Reconcile via LLM
+	// Reconcile via LLM
 	var reconciliation ReconcileResult
 	tokens, err = m.llm.Complete(ctx, reconcilePrompt, reconcileInput, "reconcile_memory", reconcileSchema, &reconciliation)
 	totalTokens += tokens
@@ -210,18 +207,17 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID string
 		return nil, fmt.Errorf("reconcile: %w", err)
 	}
 
-	// Build a lookup from candidate text → embedding to avoid re-embedding ADDs
 	candidateEmbs := make(map[string][]float32, len(candidates))
 	for _, c := range candidates {
 		candidateEmbs[c.text] = c.embedding
 	}
 
-	// Step 6: Execute actions
+	// Execute reconciliation actions
 	result := &AddResult{}
+	var deletedTexts []string
 	for _, action := range reconciliation.Memory {
 		switch action.Event {
 		case "ADD":
-			// Reuse candidate embedding if text matches, otherwise re-embed
 			emb, ok := candidateEmbs[action.Text]
 			if !ok {
 				var err error
@@ -239,7 +235,10 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID string
 		case "UPDATE":
 			realID, ok := intToID[action.ID]
 			if !ok {
-				continue // unknown ID, skip
+				continue
+			}
+			if old, exists := existingByID[realID]; exists {
+				deletedTexts = append(deletedTexts, old.Text)
 			}
 			emb, err := m.embedder.Embed(ctx, action.Text)
 			if err != nil {
@@ -255,6 +254,9 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID string
 			if !ok {
 				continue
 			}
+			if old, exists := existingByID[realID]; exists {
+				deletedTexts = append(deletedTexts, old.Text)
+			}
 			if err := m.store.DeleteFact(realID); err != nil {
 				return nil, fmt.Errorf("delete fact: %w", err)
 			}
@@ -262,6 +264,15 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID string
 
 		case "NOOP":
 			result.Noops++
+		}
+	}
+
+	// Cleanup stale relations after fact updates/deletes
+	if len(deletedTexts) > 0 {
+		if cleaned, err := m.store.CleanupStaleRelations(userID, deletedTexts); err != nil {
+			log.Printf("stale relation cleanup error (non-fatal): %v", err)
+		} else if cleaned > 0 {
+			log.Printf("cleaned %d stale relations", cleaned)
 		}
 	}
 
@@ -315,7 +326,7 @@ func (m *Memory) addGraph(ctx context.Context, messages []Message, userID string
 		}
 	}
 
-	// Upsert entities — skip pronouns, use case-insensitive key for dedup
+	// Upsert entities
 	entityKeyToID := make(map[string]string)
 	var entNames []string
 	var entIDs []string
@@ -347,7 +358,7 @@ func (m *Memory) addGraph(ctx context.Context, messages []Message, userID string
 		}
 	}
 
-	// Upsert relations — skip if source/target is pronoun
+	// Upsert relations
 	for _, r := range extraction.Relations {
 		source := strings.TrimSpace(r.Source)
 		target := strings.TrimSpace(r.Target)
@@ -386,6 +397,7 @@ func (m *Memory) addGraph(ctx context.Context, messages []Message, userID string
 // --- Read Path ---
 
 // Search finds facts similar to the query for a given user.
+// Results are re-ranked with temporal decay scoring and access counts are bumped.
 func (m *Memory) Search(ctx context.Context, query string, userID string, limit int) ([]Fact, error) {
 	if userID == "" {
 		return nil, fmt.Errorf("user_id is required")
@@ -399,7 +411,23 @@ func (m *Memory) Search(ctx context.Context, query string, userID string, limit 
 		return nil, fmt.Errorf("embed query: %w", err)
 	}
 
-	return m.store.SearchFacts(emb, userID, limit)
+	facts, err := m.store.SearchFacts(emb, userID, limit*2)
+	if err != nil {
+		return nil, err
+	}
+
+	applyDecay(facts)
+	if len(facts) > limit {
+		facts = facts[:limit]
+	}
+
+	ids := make([]string, len(facts))
+	for i, f := range facts {
+		ids[i] = f.ID
+	}
+	go func() { _ = m.store.BumpAccess(ids) }()
+
+	return facts, nil
 }
 
 // Get retrieves a single fact by ID.
@@ -469,8 +497,8 @@ func (m *Memory) GetAllRelations(ctx context.Context, userID string, limit int) 
 // --- Recall (unified retrieval) ---
 
 // Recall returns facts and relations relevant to a query in a single call.
-// It embeds the query once, runs parallel KNN searches on facts and entity
-// embeddings, and returns a pre-formatted summary for system prompt injection.
+// It embeds the query once, runs parallel KNN on facts and entity embeddings,
+// expands relations via multi-hop BFS, and returns a pre-formatted summary.
 func (m *Memory) Recall(ctx context.Context, query string, userID string, opts *RecallOptions) (*RecallResult, error) {
 	if userID == "" {
 		return nil, fmt.Errorf("user_id is required")
@@ -486,28 +514,27 @@ func (m *Memory) Recall(ctx context.Context, query string, userID string, opts *
 		}
 	}
 
-	// Single embedding for both searches
 	emb, err := m.embedder.Embed(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("embed query: %w", err)
 	}
 
 	var (
-		facts   []Fact
-		rels    []Relation
-		factErr error
-		relErr  error
-		wg      sync.WaitGroup
+		facts     []Fact
+		entityIDs []string
+		factErr   error
+		relErr    error
+		wg        sync.WaitGroup
 	)
 
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		facts, factErr = m.store.SearchFacts(emb, userID, maxFacts)
+		facts, factErr = m.store.SearchFacts(emb, userID, maxFacts*2)
 	}()
 	go func() {
 		defer wg.Done()
-		rels, relErr = m.store.SearchRelations(emb, userID, maxRels)
+		entityIDs, relErr = m.store.SearchEntityIDs(emb, userID, 10)
 	}()
 	wg.Wait()
 
@@ -515,13 +542,41 @@ func (m *Memory) Recall(ctx context.Context, query string, userID string, opts *
 		return nil, fmt.Errorf("search facts: %w", factErr)
 	}
 	if relErr != nil {
-		return nil, fmt.Errorf("search relations: %w", relErr)
+		return nil, fmt.Errorf("search entity IDs: %w", relErr)
 	}
 
-	// Pre-format summary for direct system prompt injection
+	applyDecay(facts)
+	if len(facts) > maxFacts {
+		facts = facts[:maxFacts]
+	}
+
+	factIDs := make([]string, len(facts))
+	for i, f := range facts {
+		factIDs[i] = f.ID
+	}
+	go func() { _ = m.store.BumpAccess(factIDs) }()
+
+	rels, err := m.store.ExpandRelations(entityIDs, userID, 2, maxRels)
+	if err != nil {
+		return nil, fmt.Errorf("expand relations: %w", err)
+	}
+
+	// Pre-format summary
 	var sb strings.Builder
+
+	if opts != nil && opts.IncludeProfile {
+		profile, err := m.Profile(ctx, userID)
+		if err != nil {
+			log.Printf("profile generation error (non-fatal): %v", err)
+		} else if profile != "" {
+			sb.WriteString("User profile:\n")
+			sb.WriteString(profile)
+			sb.WriteString("\n\n")
+		}
+	}
+
 	if len(facts) > 0 {
-		sb.WriteString("Known facts:\n")
+		sb.WriteString("Relevant facts:\n")
 		for _, f := range facts {
 			sb.WriteString("- ")
 			sb.WriteString(f.Text)
@@ -543,6 +598,66 @@ func (m *Memory) Recall(ctx context.Context, query string, userID string, opts *
 		Relations: rels,
 		Summary:   sb.String(),
 	}, nil
+}
+
+// --- Profile ---
+
+// Profile generates a concise user summary from all stored facts and relations.
+// The result is cached and only regenerated when facts change.
+func (m *Memory) Profile(ctx context.Context, userID string) (string, error) {
+	if userID == "" {
+		return "", fmt.Errorf("user_id is required")
+	}
+
+	facts, err := m.store.GetAllFacts(userID, 200)
+	if err != nil {
+		return "", fmt.Errorf("get facts: %w", err)
+	}
+	if len(facts) == 0 {
+		return "", nil
+	}
+
+	currentHash := profileFactHash(facts)
+
+	cached, storedHash, err := m.store.GetProfile(userID)
+	if err != nil {
+		return "", fmt.Errorf("get profile: %w", err)
+	}
+	if cached != "" && storedHash == currentHash {
+		return cached, nil
+	}
+
+	rels, err := m.store.GetAllRelations(userID, 100)
+	if err != nil {
+		return "", fmt.Errorf("get relations: %w", err)
+	}
+
+	var sb strings.Builder
+	sb.WriteString("Facts:\n")
+	for _, f := range facts {
+		sb.WriteString("- ")
+		sb.WriteString(f.Text)
+		sb.WriteString("\n")
+	}
+	if len(rels) > 0 {
+		sb.WriteString("\nRelationships:\n")
+		for _, r := range rels {
+			fmt.Fprintf(&sb, "- %s --%s--> %s\n", r.Source, r.Relation, r.Target)
+		}
+	}
+
+	type profileResult struct {
+		Profile string `json:"profile"`
+	}
+	var result profileResult
+	_, err = m.llm.Complete(ctx, profileGenerationPrompt, sb.String(), "profile", profileSchema, &result)
+	if err != nil {
+		return "", fmt.Errorf("generate profile: %w", err)
+	}
+
+	_ = m.store.UpsertProfile(userID, result.Profile, currentHash)
+
+	return result.Profile, nil
 }
 
 // --- Import / Export ---
@@ -599,7 +714,6 @@ func (m *Memory) Import(ctx context.Context, userID string, r io.Reader) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
-	// Collect records by type for batch embedding
 	var factTexts []string
 	var entityRecords []ExportRecord
 	var relationRecords []ExportRecord
@@ -626,7 +740,6 @@ func (m *Memory) Import(ctx context.Context, userID string, r io.Reader) error {
 		return fmt.Errorf("read input: %w", err)
 	}
 
-	// Import facts with batch embedding
 	if len(factTexts) > 0 {
 		embs, err := m.embedder.EmbedBatch(ctx, factTexts)
 		if err != nil {
@@ -639,7 +752,6 @@ func (m *Memory) Import(ctx context.Context, userID string, r io.Reader) error {
 		}
 	}
 
-	// Import entities with batch embedding
 	if len(entityRecords) > 0 {
 		names := make([]string, len(entityRecords))
 		for i, rec := range entityRecords {
@@ -660,7 +772,6 @@ func (m *Memory) Import(ctx context.Context, userID string, r io.Reader) error {
 		}
 	}
 
-	// Import relations (resolve entity names to IDs)
 	for _, rec := range relationRecords {
 		srcID, err := m.store.UpsertEntity(userID, rec.Source, "other")
 		if err != nil {
@@ -676,159 +787,4 @@ func (m *Memory) Import(ctx context.Context, userID string, r io.Reader) error {
 	}
 
 	return nil
-}
-
-// --- Helpers ---
-
-// maxMessageChars is the approximate character budget for messages (~25K tokens).
-const maxMessageChars = 100_000
-
-// truncateMessages keeps the last N messages that fit within maxChars.
-// Always keeps at least 1 message. Logs a warning if truncation occurs.
-func truncateMessages(messages []Message, maxChars int) []Message {
-	total := 0
-	for _, m := range messages {
-		total += len(m.Role) + len(m.Content) + 3 // "role: content\n"
-	}
-	if total <= maxChars {
-		return messages
-	}
-
-	budget := maxChars
-	start := len(messages)
-	for i := len(messages) - 1; i >= 0; i-- {
-		cost := len(messages[i].Role) + len(messages[i].Content) + 3
-		if budget-cost < 0 && start < len(messages) {
-			break
-		}
-		budget -= cost
-		start = i
-	}
-	log.Printf("truncating conversation from %d to %d messages (%d chars exceeded %d limit)",
-		len(messages), len(messages)-start, total, maxChars)
-	return messages[start:]
-}
-
-func hashFact(text string) string {
-	h := sha256.Sum256([]byte(text))
-	return fmt.Sprintf("%x", h)
-}
-
-func formatMessages(messages []Message) string {
-	var sb strings.Builder
-	for _, msg := range messages {
-		sb.WriteString(msg.Role)
-		sb.WriteString(": ")
-		sb.WriteString(msg.Content)
-		sb.WriteString("\n")
-	}
-	return sb.String()
-}
-
-// formatUserMessages returns only user messages (filters out assistant/system noise).
-func formatUserMessages(messages []Message) string {
-	var sb strings.Builder
-	for _, msg := range messages {
-		if msg.Role != "user" {
-			continue
-		}
-		sb.WriteString("user: ")
-		sb.WriteString(msg.Content)
-		sb.WriteString("\n")
-	}
-	return sb.String()
-}
-
-// entityKey returns a case-insensitive lookup key for entity deduplication.
-func entityKey(name string) string {
-	return strings.ToLower(strings.TrimSpace(name))
-}
-
-// isPronoun returns true if the name is a pronoun that shouldn't be an entity.
-var pronouns = map[string]bool{
-	"i": true, "me": true, "my": true, "mine": true, "myself": true,
-	"he": true, "him": true, "his": true, "himself": true,
-	"she": true, "her": true, "hers": true, "herself": true,
-	"it": true, "its": true, "itself": true,
-	"we": true, "us": true, "our": true, "ours": true, "ourselves": true,
-	"they": true, "them": true, "their": true, "theirs": true, "themselves": true,
-	"you": true, "your": true, "yours": true, "yourself": true,
-	"user": true,
-}
-
-func isPronoun(name string) bool {
-	return pronouns[strings.ToLower(strings.TrimSpace(name))]
-}
-
-// --- Extraction Validator ---
-
-// extractionIssues holds categorized validation results.
-type extractionIssues struct {
-	errors   []string // serious: trigger a repass
-	warnings []string // cosmetic: log but don't retry
-}
-
-// validateExtraction checks an entity extraction result for rule violations.
-func validateExtraction(e *EntityExtractionResult) extractionIssues {
-	var issues extractionIssues
-
-	// Build entity name set for referential integrity checks
-	entityNames := make(map[string]bool)
-	for _, ent := range e.Entities {
-		entityNames[entityKey(ent.Name)] = true
-	}
-
-	// Error: resolved_text must not be empty
-	if strings.TrimSpace(e.ResolvedText) == "" {
-		issues.errors = append(issues.errors, "resolved_text is empty — you must rewrite user messages with pronouns resolved")
-	}
-
-	// Error: no pronoun entity names
-	for _, ent := range e.Entities {
-		if isPronoun(ent.Name) {
-			issues.errors = append(issues.errors, fmt.Sprintf("entity %q is a pronoun — resolve it to a concrete name", ent.Name))
-		}
-		if strings.TrimSpace(ent.Name) == "" {
-			issues.errors = append(issues.errors, "entity has an empty name")
-		}
-	}
-
-	// Error: relation source/target must not be a pronoun
-	for _, r := range e.Relations {
-		if isPronoun(r.Source) {
-			issues.errors = append(issues.errors, fmt.Sprintf("relation source %q is a pronoun — use the resolved entity name", r.Source))
-		}
-		if isPronoun(r.Target) {
-			issues.errors = append(issues.errors, fmt.Sprintf("relation target %q is a pronoun — use the resolved entity name", r.Target))
-		}
-	}
-
-	// Error: no self-referential relations
-	for _, r := range e.Relations {
-		if entityKey(r.Source) == entityKey(r.Target) {
-			issues.errors = append(issues.errors, fmt.Sprintf("relation %s --%s--> %s is self-referential", r.Source, r.Relation, r.Target))
-		}
-	}
-
-	// Error: duplicate entities (same name, different case)
-	seen := make(map[string]string)
-	for _, ent := range e.Entities {
-		k := entityKey(ent.Name)
-		if prev, exists := seen[k]; exists && prev != ent.Name {
-			issues.errors = append(issues.errors, fmt.Sprintf("duplicate entity: %q and %q are the same — use consistent casing", prev, ent.Name))
-		}
-		seen[k] = ent.Name
-	}
-
-	// Warning: relation source/target not in entities list (handled by auto-create)
-	for _, r := range e.Relations {
-		if !entityNames[entityKey(r.Source)] && !isPronoun(r.Source) {
-			issues.warnings = append(issues.warnings, fmt.Sprintf("relation source %q not in entities list", r.Source))
-		}
-		if !entityNames[entityKey(r.Target)] && !isPronoun(r.Target) {
-			issues.warnings = append(issues.warnings, fmt.Sprintf("relation target %q not in entities list", r.Target))
-		}
-	}
-
-	return issues
 }

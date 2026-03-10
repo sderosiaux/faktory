@@ -18,12 +18,14 @@ func init() {
 
 const schema = `
 CREATE TABLE IF NOT EXISTS facts (
-    id         TEXT PRIMARY KEY,
-    user_id    TEXT NOT NULL,
-    text       TEXT NOT NULL,
-    hash       TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    id              TEXT PRIMARY KEY,
+    user_id         TEXT NOT NULL,
+    text            TEXT NOT NULL,
+    hash            TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    access_count    INTEGER NOT NULL DEFAULT 0,
+    last_accessed_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS entities (
@@ -60,6 +62,13 @@ CREATE TABLE IF NOT EXISTS processed_conversations (
     created_at   TEXT NOT NULL,
     PRIMARY KEY(user_id, content_hash)
 );
+
+CREATE TABLE IF NOT EXISTS profiles (
+    user_id    TEXT PRIMARY KEY,
+    summary    TEXT NOT NULL,
+    fact_hash  TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 `
 
 type Store struct {
@@ -94,6 +103,21 @@ func OpenStore(dbPath string, dimension int) (*Store, error) {
 		if _, err := db.Exec(vecSQL); err != nil {
 			db.Close()
 			return nil, fmt.Errorf("create %s: %w", tbl, err)
+		}
+	}
+
+	// Migrate: add access_count and last_accessed_at to facts if missing
+	for _, col := range []struct{ name, ddl string }{
+		{"access_count", "ALTER TABLE facts ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0"},
+		{"last_accessed_at", "ALTER TABLE facts ADD COLUMN last_accessed_at TEXT"},
+	} {
+		var exists int
+		_ = db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('facts') WHERE name = ?", col.name).Scan(&exists)
+		if exists == 0 {
+			if _, err := db.Exec(col.ddl); err != nil {
+				db.Close()
+				return nil, fmt.Errorf("migrate %s: %w", col.name, err)
+			}
 		}
 	}
 
@@ -184,8 +208,8 @@ func (s *Store) DeleteFact(id string) error {
 
 func (s *Store) GetFact(id string) (*Fact, error) {
 	var f Fact
-	err := s.db.QueryRow("SELECT id, user_id, text, hash, created_at, updated_at FROM facts WHERE id = ?", id).
-		Scan(&f.ID, &f.UserID, &f.Text, &f.Hash, &f.CreatedAt, &f.UpdatedAt)
+	err := s.db.QueryRow("SELECT id, user_id, text, hash, created_at, updated_at, access_count FROM facts WHERE id = ?", id).
+		Scan(&f.ID, &f.UserID, &f.Text, &f.Hash, &f.CreatedAt, &f.UpdatedAt, &f.AccessCount)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -195,8 +219,27 @@ func (s *Store) GetFact(id string) (*Fact, error) {
 	return &f, nil
 }
 
+// BumpAccess increments access_count and sets last_accessed_at for the given fact IDs.
+func (s *Store) BumpAccess(ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	ts := now()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, id := range ids {
+		if _, err := tx.Exec("UPDATE facts SET access_count = access_count + 1, last_accessed_at = ? WHERE id = ?", ts, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *Store) GetAllFacts(userID string, limit int) ([]Fact, error) {
-	rows, err := s.db.Query("SELECT id, user_id, text, hash, created_at, updated_at FROM facts WHERE user_id = ? ORDER BY created_at DESC LIMIT ?", userID, limit)
+	rows, err := s.db.Query("SELECT id, user_id, text, hash, created_at, updated_at, access_count FROM facts WHERE user_id = ? ORDER BY created_at DESC LIMIT ?", userID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -205,7 +248,7 @@ func (s *Store) GetAllFacts(userID string, limit int) ([]Fact, error) {
 	var facts []Fact
 	for rows.Next() {
 		var f Fact
-		if err := rows.Scan(&f.ID, &f.UserID, &f.Text, &f.Hash, &f.CreatedAt, &f.UpdatedAt); err != nil {
+		if err := rows.Scan(&f.ID, &f.UserID, &f.Text, &f.Hash, &f.CreatedAt, &f.UpdatedAt, &f.AccessCount); err != nil {
 			return nil, err
 		}
 		facts = append(facts, f)
@@ -227,7 +270,7 @@ func (s *Store) SearchFacts(queryEmbedding []float32, userID string, limit int) 
 	}
 
 	rows, err := s.db.Query(`
-		SELECT f.id, f.user_id, f.text, f.hash, f.created_at, f.updated_at, e.distance
+		SELECT f.id, f.user_id, f.text, f.hash, f.created_at, f.updated_at, f.access_count, e.distance
 		FROM fact_embeddings e
 		JOIN facts f ON f.id = e.id
 		WHERE e.embedding MATCH ?
@@ -245,7 +288,7 @@ func (s *Store) SearchFacts(queryEmbedding []float32, userID string, limit int) 
 	for rows.Next() {
 		var f Fact
 		var dist float64
-		if err := rows.Scan(&f.ID, &f.UserID, &f.Text, &f.Hash, &f.CreatedAt, &f.UpdatedAt, &dist); err != nil {
+		if err := rows.Scan(&f.ID, &f.UserID, &f.Text, &f.Hash, &f.CreatedAt, &f.UpdatedAt, &f.AccessCount, &dist); err != nil {
 			return nil, err
 		}
 		f.Score = 1 - dist // cosine distance → similarity
@@ -319,8 +362,107 @@ func (s *Store) DeleteAllForUser(userID string) error {
 	if _, err := tx.Exec("DELETE FROM processed_conversations WHERE user_id = ?", userID); err != nil {
 		return err
 	}
+	if _, err := tx.Exec("DELETE FROM profiles WHERE user_id = ?", userID); err != nil {
+		return err
+	}
 
 	return tx.Commit()
+}
+
+// CleanupStaleRelations removes relations where the source or target entity name
+// appears in deletedTexts but not in any remaining fact for the user.
+func (s *Store) CleanupStaleRelations(userID string, deletedTexts []string) (int, error) {
+	if len(deletedTexts) == 0 {
+		return 0, nil
+	}
+
+	// Get all entity names for this user
+	entities, err := s.GetAllEntities(userID, 100_000)
+	if err != nil {
+		return 0, err
+	}
+
+	// Find entity names mentioned in deleted fact texts
+	var affectedEntityIDs []string
+	for _, e := range entities {
+		nameLower := strings.ToLower(e.Name)
+		for _, dt := range deletedTexts {
+			if strings.Contains(strings.ToLower(dt), nameLower) {
+				affectedEntityIDs = append(affectedEntityIDs, e.ID)
+				break
+			}
+		}
+	}
+
+	if len(affectedEntityIDs) == 0 {
+		return 0, nil
+	}
+
+	// For each affected entity, check if it still appears in any remaining fact
+	remainingFacts, err := s.GetAllFacts(userID, 100_000)
+	if err != nil {
+		return 0, err
+	}
+
+	// Build a combined text of all remaining facts for quick contains check
+	var allText strings.Builder
+	for _, f := range remainingFacts {
+		allText.WriteString(strings.ToLower(f.Text))
+		allText.WriteString(" ")
+	}
+	remainingText := allText.String()
+
+	// Find entities that no longer appear in any fact
+	var orphanedIDs []string
+	for _, e := range entities {
+		for _, aid := range affectedEntityIDs {
+			if e.ID == aid && !strings.Contains(remainingText, strings.ToLower(e.Name)) {
+				orphanedIDs = append(orphanedIDs, e.ID)
+			}
+		}
+	}
+
+	if len(orphanedIDs) == 0 {
+		return 0, nil
+	}
+
+	// Delete relations involving orphaned entities
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	deleted := 0
+	for _, id := range orphanedIDs {
+		res, err := tx.Exec("DELETE FROM relations WHERE user_id = ? AND (source_id = ? OR target_id = ?)", userID, id, id)
+		if err != nil {
+			return 0, err
+		}
+		n, _ := res.RowsAffected()
+		deleted += int(n)
+	}
+
+	return deleted, tx.Commit()
+}
+
+// --- Profiles ---
+
+// GetProfile returns the cached profile for a user, or nil if none exists.
+func (s *Store) GetProfile(userID string) (summary, factHash string, err error) {
+	err = s.db.QueryRow("SELECT summary, fact_hash FROM profiles WHERE user_id = ?", userID).Scan(&summary, &factHash)
+	if err == sql.ErrNoRows {
+		return "", "", nil
+	}
+	return
+}
+
+// UpsertProfile stores or updates the cached profile for a user.
+func (s *Store) UpsertProfile(userID, summary, factHash string) error {
+	_, err := s.db.Exec(`INSERT INTO profiles (user_id, summary, fact_hash, updated_at) VALUES (?, ?, ?, ?)
+		ON CONFLICT(user_id) DO UPDATE SET summary = ?, fact_hash = ?, updated_at = ?`,
+		userID, summary, factHash, now(), summary, factHash, now())
+	return err
 }
 
 // --- Conversation Dedup ---
@@ -423,6 +565,128 @@ func (s *Store) GetAllRelations(userID string, limit int) ([]Relation, error) {
 		rels = append(rels, r)
 	}
 	return rels, rows.Err()
+}
+
+// ExpandRelations performs BFS from seed entity IDs, following relation edges
+// up to maxDepth hops. Returns deduplicated relations with hop distance.
+func (s *Store) ExpandRelations(seedIDs []string, userID string, maxDepth int, limit int) ([]Relation, error) {
+	if len(seedIDs) == 0 {
+		return nil, nil
+	}
+
+	seen := make(map[string]bool)     // relation IDs already collected
+	frontier := make(map[string]bool) // entity IDs to explore
+	for _, id := range seedIDs {
+		frontier[id] = true
+	}
+
+	var result []Relation
+
+	for depth := 0; depth < maxDepth && len(frontier) > 0 && len(result) < limit; depth++ {
+		ids := make([]string, 0, len(frontier))
+		for id := range frontier {
+			ids = append(ids, id)
+		}
+
+		placeholders := make([]string, len(ids))
+		args := make([]any, 0, len(ids)*2+2)
+		args = append(args, userID)
+		for i, id := range ids {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		inClause := strings.Join(placeholders, ",")
+		for _, id := range ids {
+			args = append(args, id)
+		}
+		args = append(args, limit-len(result))
+
+		q := fmt.Sprintf(`
+			SELECT r.id, r.relation,
+			       s.id, s.name, s.type,
+			       t.id, t.name, t.type
+			FROM relations r
+			JOIN entities s ON s.id = r.source_id
+			JOIN entities t ON t.id = r.target_id
+			WHERE r.user_id = ?
+			  AND (r.source_id IN (%s) OR r.target_id IN (%s))
+			LIMIT ?
+		`, inClause, inClause)
+
+		rows, err := s.db.Query(q, args...)
+		if err != nil {
+			return nil, err
+		}
+
+		nextFrontier := make(map[string]bool)
+		for rows.Next() {
+			var r Relation
+			var srcID, tgtID string
+			if err := rows.Scan(&r.ID, &r.Relation, &srcID, &r.Source, &r.SourceType, &tgtID, &r.Target, &r.TargetType); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if seen[r.ID] {
+				continue
+			}
+			seen[r.ID] = true
+			result = append(result, r)
+			// Add newly discovered entities to next frontier
+			if !frontier[srcID] {
+				nextFrontier[srcID] = true
+			}
+			if !frontier[tgtID] {
+				nextFrontier[tgtID] = true
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+
+		// Move to next hop
+		frontier = nextFrontier
+	}
+
+	return result, nil
+}
+
+// SearchEntityIDs returns entity IDs matching the query embedding via KNN.
+func (s *Store) SearchEntityIDs(queryEmbedding []float32, userID string, limit int) ([]string, error) {
+	embJSON, err := json.Marshal(queryEmbedding)
+	if err != nil {
+		return nil, err
+	}
+	kFetch := limit * 20
+	if kFetch > 200 {
+		kFetch = 200
+	}
+
+	rows, err := s.db.Query(`
+		SELECT e.id
+		FROM entity_embeddings ee
+		JOIN entities e ON e.id = ee.id
+		WHERE ee.embedding MATCH ?
+		  AND k = ?
+		  AND e.user_id = ?
+	`, string(embJSON), kFetch, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+		if len(ids) >= limit {
+			break
+		}
+	}
+	return ids, rows.Err()
 }
 
 func (s *Store) SearchRelations(queryEmbedding []float32, userID string, limit int) ([]Relation, error) {
