@@ -1,0 +1,63 @@
+version: "2"
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+    - ineffassign
+    - gocritic
+    - revive
+    - misspell
+    - unconvert
+    - sqlclosecheck
+    - bodyclose
+    - errorlint
+    - exhaustive
+    - copyloopvar
+  settings:
+    gocritic: {}
+    revive:
+      rules:
+        - name: context-as-argument
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: increment-decrement
+        - name: var-declaration
+        - name: range
+        - name: receiver-naming
+        - name: indent-error-flow
+        - name: empty-block
+        - name: superfluous-else
+        - name: unreachable-code
+        - name: redefines-builtin-id
+    errcheck:
+      check-type-assertions: true
+    exhaustive:
+      default-signifies-exhaustive: true
+  exclusions:
+    rules:
+      # Test files: cleanup errors are acceptable
+      - path: _test\.go
+        linters: [errcheck]
+      # defer Close/Rollback — error checking is impractical
+      - text: "Error return value of .*(Close|Rollback).*is not checked"
+        linters: [errcheck]
+      # Exported without comment — not a public library
+      - text: "exported .* should have comment"
+        linters: [revive]
+      - text: "package-comments"
+        linters: [revive]
+      # Blank import for sqlite3 driver registration
+      - text: "blank-imports"
+        linters: [revive]
+      # Cobra requires fixed signatures, ctx kept for API consistency
+      - text: "unused-parameter"
+        linters: [revive]
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

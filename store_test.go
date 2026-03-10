@@ -267,7 +267,12 @@ func TestSearchRelations(t *testing.T) {
 	tgtID, _ := s.UpsertEntity("alice", "Lyon", "place")
 	s.UpsertRelation("alice", srcID, "lives_in", tgtID)
 
-	rels, err := s.SearchRelations("Alice", "alice", 10)
+	// Embed entities with distinct vectors
+	s.UpsertEntityEmbedding(srcID, []float32{1, 0, 0, 0})
+	s.UpsertEntityEmbedding(tgtID, []float32{0, 1, 0, 0})
+
+	// Search with vector close to "Alice"
+	rels, err := s.SearchRelations([]float32{0.9, 0.1, 0, 0}, "alice", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,12 +280,14 @@ func TestSearchRelations(t *testing.T) {
 		t.Errorf("got %d results, want 1", len(rels))
 	}
 
-	rels, _ = s.SearchRelations("Lyon", "alice", 10)
+	// Search with vector close to "Lyon"
+	rels, _ = s.SearchRelations([]float32{0.1, 0.9, 0, 0}, "alice", 10)
 	if len(rels) != 1 {
 		t.Errorf("got %d results for Lyon, want 1", len(rels))
 	}
 
-	rels, _ = s.SearchRelations("Alice", "bob", 10)
+	// Different user should get no results
+	rels, _ = s.SearchRelations([]float32{1, 0, 0, 0}, "bob", 10)
 	if len(rels) != 0 {
 		t.Errorf("bob should have 0 results, got %d", len(rels))
 	}

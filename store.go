@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
@@ -60,10 +61,12 @@ type Store struct {
 }
 
 func OpenStore(dbPath string, dimension int) (*Store, error) {
-	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_foreign_keys=on")
+	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_foreign_keys=on&_busy_timeout=5000&_synchronous=NORMAL&_cache_size=-20000")
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
+	// Single connection avoids WAL contention for this single-process use case
+	db.SetMaxOpenConns(1)
 
 	// Verify sqlite-vec is loaded
 	var vecVersion string
@@ -78,11 +81,13 @@ func OpenStore(dbPath string, dimension int) (*Store, error) {
 		return nil, fmt.Errorf("migrate schema: %w", err)
 	}
 
-	// Create vec0 virtual table (cannot use IF NOT EXISTS with virtual tables in all versions)
-	vecSQL := fmt.Sprintf(`CREATE VIRTUAL TABLE IF NOT EXISTS fact_embeddings USING vec0(id TEXT PRIMARY KEY, embedding float[%d] distance_metric=cosine)`, dimension)
-	if _, err := db.Exec(vecSQL); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("create fact_embeddings: %w", err)
+	// Create vec0 virtual tables
+	for _, tbl := range []string{"fact_embeddings", "entity_embeddings"} {
+		vecSQL := fmt.Sprintf(`CREATE VIRTUAL TABLE IF NOT EXISTS %s USING vec0(id TEXT PRIMARY KEY, embedding float[%d] distance_metric=cosine)`, tbl, dimension)
+		if _, err := db.Exec(vecSQL); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("create %s: %w", tbl, err)
+		}
 	}
 
 	return &Store{db: db, dimension: dimension}, nil
@@ -248,6 +253,23 @@ func (s *Store) FactExistsByHash(userID, hash string) (bool, error) {
 	return count > 0, err
 }
 
+func queryIDs(tx *sql.Tx, query string, args ...any) ([]string, error) {
+	rows, err := tx.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 func (s *Store) DeleteAllForUser(userID string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -255,23 +277,12 @@ func (s *Store) DeleteAllForUser(userID string) error {
 	}
 	defer tx.Rollback()
 
-	// Get all fact IDs for this user to delete embeddings
-	rows, err := tx.Query("SELECT id FROM facts WHERE user_id = ?", userID)
+	// Delete fact embeddings
+	factIDs, err := queryIDs(tx, "SELECT id FROM facts WHERE user_id = ?", userID)
 	if err != nil {
 		return err
 	}
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return err
-		}
-		ids = append(ids, id)
-	}
-	rows.Close()
-
-	for _, id := range ids {
+	for _, id := range factIDs {
 		if _, err := tx.Exec("DELETE FROM fact_embeddings WHERE id = ?", id); err != nil {
 			return err
 		}
@@ -283,6 +294,18 @@ func (s *Store) DeleteAllForUser(userID string) error {
 	if _, err := tx.Exec("DELETE FROM relations WHERE user_id = ?", userID); err != nil {
 		return err
 	}
+
+	// Delete entity embeddings
+	entIDs, err := queryIDs(tx, "SELECT id FROM entities WHERE user_id = ?", userID)
+	if err != nil {
+		return err
+	}
+	for _, id := range entIDs {
+		if _, err := tx.Exec("DELETE FROM entity_embeddings WHERE id = ?", id); err != nil {
+			return err
+		}
+	}
+
 	if _, err := tx.Exec("DELETE FROM entities WHERE user_id = ?", userID); err != nil {
 		return err
 	}
@@ -306,6 +329,21 @@ func (s *Store) UpsertEntity(userID, name, entityType string) (string, error) {
 	var actualID string
 	err = s.db.QueryRow("SELECT id FROM entities WHERE user_id = ? AND name = ? AND type = ?", userID, name, entityType).Scan(&actualID)
 	return actualID, err
+}
+
+func (s *Store) UpsertEntityEmbedding(entityID string, embedding []float32) error {
+	embJSON, err := json.Marshal(embedding)
+	if err != nil {
+		return err
+	}
+	// Delete old embedding if exists, then insert new
+	if _, err := s.db.Exec("DELETE FROM entity_embeddings WHERE id = ?", entityID); err != nil {
+		return fmt.Errorf("delete old entity embedding: %w", err)
+	}
+	if _, err := s.db.Exec("INSERT INTO entity_embeddings (id, embedding) VALUES (?, ?)", entityID, string(embJSON)); err != nil {
+		return fmt.Errorf("insert entity embedding: %w", err)
+	}
+	return nil
 }
 
 // --- Relations ---
@@ -347,9 +385,64 @@ func (s *Store) GetAllRelations(userID string, limit int) ([]Relation, error) {
 	return rels, rows.Err()
 }
 
-func (s *Store) SearchRelations(query string, userID string, limit int) ([]Relation, error) {
-	pattern := "%" + query + "%"
-	rows, err := s.db.Query(`
+func (s *Store) SearchRelations(queryEmbedding []float32, userID string, limit int) ([]Relation, error) {
+	embJSON, err := json.Marshal(queryEmbedding)
+	if err != nil {
+		return nil, err
+	}
+
+	// KNN search entity_embeddings, over-fetch then filter by user_id via JOIN
+	kFetch := limit * 20
+	if kFetch > 200 {
+		kFetch = 200
+	}
+
+	// Find entity IDs matching the query embedding
+	entityRows, err := s.db.Query(`
+		SELECT e.id
+		FROM entity_embeddings ee
+		JOIN entities e ON e.id = ee.id
+		WHERE ee.embedding MATCH ?
+		  AND k = ?
+		  AND e.user_id = ?
+	`, string(embJSON), kFetch, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer entityRows.Close()
+	var entityIDs []string
+	for entityRows.Next() {
+		var id string
+		if err := entityRows.Scan(&id); err != nil {
+			return nil, err
+		}
+		entityIDs = append(entityIDs, id)
+	}
+	if err := entityRows.Err(); err != nil {
+		return nil, err
+	}
+
+	if len(entityIDs) == 0 {
+		return []Relation{}, nil
+	}
+
+	// Build IN clause for matched entity IDs
+	placeholders := make([]string, len(entityIDs))
+	args := make([]any, 0, len(entityIDs)*2+2)
+	args = append(args, userID)
+	for i, id := range entityIDs {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	inClause := strings.Join(placeholders, ",")
+
+	// Duplicate the entity ID args for the second IN clause (target_id)
+	for _, id := range entityIDs {
+		args = append(args, id)
+	}
+	args = append(args, limit)
+
+	q := fmt.Sprintf(`
 		SELECT r.id, r.relation,
 		       s.name, s.type,
 		       t.name, t.type
@@ -357,10 +450,12 @@ func (s *Store) SearchRelations(query string, userID string, limit int) ([]Relat
 		JOIN entities s ON s.id = r.source_id
 		JOIN entities t ON t.id = r.target_id
 		WHERE r.user_id = ?
-		  AND (s.name LIKE ? OR t.name LIKE ? OR r.relation LIKE ?)
+		  AND (r.source_id IN (%s) OR r.target_id IN (%s))
 		ORDER BY r.created_at DESC
 		LIMIT ?
-	`, userID, pattern, pattern, pattern, limit)
+	`, inClause, inClause)
+
+	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}

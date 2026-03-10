@@ -65,11 +65,11 @@ type ExtractedEntity struct {
 type ExtractedRelation struct {
 	Source   string `json:"source"`
 	Relation string `json:"relation"`
-	Target  string `json:"target"`
+	Target   string `json:"target"`
 }
 
 type EntityExtractionResult struct {
-	Entities  []ExtractedEntity  `json:"entities"`
+	Entities  []ExtractedEntity   `json:"entities"`
 	Relations []ExtractedRelation `json:"relations"`
 }
 

@@ -2,7 +2,7 @@ package faktory
 
 // Message represents a single message in a conversation.
 type Message struct {
-	Role    string `json:"role"`    // "user", "assistant", "system"
+	Role    string `json:"role"` // "user", "assistant", "system"
 	Content string `json:"content"`
 }
 
@@ -33,6 +33,7 @@ type AddResult struct {
 	Updated []Fact   `json:"updated,omitempty"`
 	Deleted []string `json:"deleted,omitempty"`
 	Noops   int      `json:"noops,omitempty"`
+	Tokens  int      `json:"tokens,omitempty"`
 }
 
 // Config holds all configuration for a Memory instance.

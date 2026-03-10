@@ -28,10 +28,10 @@ func NewLLM(baseURL, apiKey, model string) *LLM {
 }
 
 type chatRequest struct {
-	Model          string            `json:"model"`
-	Messages       []chatMessage     `json:"messages"`
-	Temperature    float64           `json:"temperature"`
-	ResponseFormat *responseFormat   `json:"response_format,omitempty"`
+	Model          string          `json:"model"`
+	Messages       []chatMessage   `json:"messages"`
+	Temperature    float64         `json:"temperature"`
+	ResponseFormat *responseFormat `json:"response_format,omitempty"`
 }
 
 type chatMessage struct {
@@ -56,11 +56,14 @@ type chatResponse struct {
 			Content string `json:"content"`
 		} `json:"message"`
 	} `json:"choices"`
+	Usage struct {
+		TotalTokens int `json:"total_tokens"`
+	} `json:"usage"`
 }
 
-// Complete sends a chat completion request and returns the parsed JSON response.
-// It tries json_schema mode first, falls back to json_object if that fails.
-func (l *LLM) Complete(ctx context.Context, system, user string, schemaName string, schema json.RawMessage, result any) error {
+// Complete sends a chat completion request, parses the JSON response into result,
+// and returns the total tokens consumed across all attempts.
+func (l *LLM) Complete(ctx context.Context, system, user string, schemaName string, schema json.RawMessage, result any) (int, error) {
 	messages := []chatMessage{
 		{Role: "system", Content: system},
 		{Role: "user", Content: user},
@@ -80,36 +83,41 @@ func (l *LLM) Complete(ctx context.Context, system, user string, schemaName stri
 		}
 	}
 
-	raw, err := l.doRequest(ctx, messages, rf)
+	totalTokens := 0
+
+	raw, tokens, err := l.doRequest(ctx, messages, rf)
+	totalTokens += tokens
 	if err != nil {
 		// If json_schema mode fails with 400, fall back to json_object
 		if !l.useJSONObject {
 			l.useJSONObject = true
 			rf = &responseFormat{Type: "json_object"}
-			raw, err = l.doRequest(ctx, messages, rf)
+			raw, tokens, err = l.doRequest(ctx, messages, rf)
+			totalTokens += tokens
 			if err != nil {
-				return err
+				return totalTokens, err
 			}
 		} else {
-			return err
+			return totalTokens, err
 		}
 	}
 
 	if err := json.Unmarshal([]byte(raw), result); err != nil {
 		// Retry once on parse failure
-		raw, retryErr := l.doRequest(ctx, messages, rf)
+		raw, tokens, retryErr := l.doRequest(ctx, messages, rf)
+		totalTokens += tokens
 		if retryErr != nil {
-			return fmt.Errorf("retry failed: %w (original parse error: %v)", retryErr, err)
+			return totalTokens, fmt.Errorf("retry after parse error %w: %w", err, retryErr)
 		}
 		if err := json.Unmarshal([]byte(raw), result); err != nil {
-			return fmt.Errorf("parse LLM response: %w\nraw: %s", err, raw)
+			return totalTokens, fmt.Errorf("parse LLM response: %w\nraw: %s", err, raw)
 		}
 	}
 
-	return nil
+	return totalTokens, nil
 }
 
-func (l *LLM) doRequest(ctx context.Context, messages []chatMessage, rf *responseFormat) (string, error) {
+func (l *LLM) doRequest(ctx context.Context, messages []chatMessage, rf *responseFormat) (string, int, error) {
 	req := chatRequest{
 		Model:          l.model,
 		Messages:       messages,
@@ -119,12 +127,12 @@ func (l *LLM) doRequest(ctx context.Context, messages []chatMessage, rf *respons
 
 	body, err := json.Marshal(req)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", l.baseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	if l.apiKey != "" {
@@ -133,27 +141,27 @@ func (l *LLM) doRequest(ctx context.Context, messages []chatMessage, rf *respons
 
 	resp, err := l.httpClient.Do(httpReq)
 	if err != nil {
-		return "", fmt.Errorf("LLM request: %w", err)
+		return "", 0, fmt.Errorf("LLM request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("read LLM response: %w", err)
+		return "", 0, fmt.Errorf("read LLM response: %w", err)
 	}
 
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("LLM returned %d: %s", resp.StatusCode, string(respBody))
+		return "", 0, fmt.Errorf("LLM returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	var chatResp chatResponse
 	if err := json.Unmarshal(respBody, &chatResp); err != nil {
-		return "", fmt.Errorf("decode LLM response: %w", err)
+		return "", 0, fmt.Errorf("decode LLM response: %w", err)
 	}
 
 	if len(chatResp.Choices) == 0 {
-		return "", fmt.Errorf("LLM returned no choices")
+		return "", 0, fmt.Errorf("LLM returned no choices")
 	}
 
-	return chatResp.Choices[0].Message.Content, nil
+	return chatResp.Choices[0].Message.Content, chatResp.Usage.TotalTokens, nil
 }

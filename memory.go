@@ -49,10 +49,11 @@ func (m *Memory) Add(ctx context.Context, messages []Message, userID string) (*A
 	}
 
 	var (
-		factResult *AddResult
-		factErr    error
-		graphErr   error
-		wg         sync.WaitGroup
+		factResult  *AddResult
+		factErr     error
+		graphTokens int
+		graphErr    error
+		wg          sync.WaitGroup
 	)
 
 	wg.Add(2)
@@ -66,7 +67,7 @@ func (m *Memory) Add(ctx context.Context, messages []Message, userID string) (*A
 	// Graph pipeline (non-fatal)
 	go func() {
 		defer wg.Done()
-		graphErr = m.addGraph(ctx, messages, userID)
+		graphTokens, graphErr = m.addGraph(ctx, messages, userID)
 	}()
 
 	wg.Wait()
@@ -79,6 +80,7 @@ func (m *Memory) Add(ctx context.Context, messages []Message, userID string) (*A
 		return nil, fmt.Errorf("fact pipeline: %w", factErr)
 	}
 
+	factResult.Tokens += graphTokens
 	return factResult, nil
 }
 
@@ -86,15 +88,20 @@ func (m *Memory) Add(ctx context.Context, messages []Message, userID string) (*A
 
 func (m *Memory) addFacts(ctx context.Context, messages []Message, userID string) (*AddResult, error) {
 	// Step 1: Extract facts from conversation
+	messages = truncateMessages(messages, maxMessageChars)
 	userContent := formatMessages(messages)
 
+	totalTokens := 0
+
 	var extraction FactExtractionResult
-	if err := m.llm.Complete(ctx, factExtractionPrompt, userContent, "fact_extraction", factExtractionSchema, &extraction); err != nil {
+	tokens, err := m.llm.Complete(ctx, factExtractionPrompt, userContent, "fact_extraction", factExtractionSchema, &extraction)
+	totalTokens += tokens
+	if err != nil {
 		return nil, fmt.Errorf("extract facts: %w", err)
 	}
 
 	if len(extraction.Facts) == 0 {
-		return &AddResult{}, nil
+		return &AddResult{Tokens: totalTokens}, nil
 	}
 
 	// Step 2: For each fact, check hash, embed, and search similar
@@ -179,7 +186,9 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID string
 
 	// Step 5: Reconcile via LLM
 	var reconciliation ReconcileResult
-	if err := m.llm.Complete(ctx, reconcilePrompt, reconcileInput, "reconcile_memory", reconcileSchema, &reconciliation); err != nil {
+	tokens, err = m.llm.Complete(ctx, reconcilePrompt, reconcileInput, "reconcile_memory", reconcileSchema, &reconciliation)
+	totalTokens += tokens
+	if err != nil {
 		return nil, fmt.Errorf("reconcile: %w", err)
 	}
 
@@ -238,37 +247,47 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID string
 		}
 	}
 
+	result.Tokens = totalTokens
 	return result, nil
 }
 
 // --- Graph Pipeline ---
 
-func (m *Memory) addGraph(ctx context.Context, messages []Message, userID string) error {
+func (m *Memory) addGraph(ctx context.Context, messages []Message, userID string) (int, error) {
+	messages = truncateMessages(messages, maxMessageChars)
 	userContent := formatMessages(messages)
 
 	var extraction EntityExtractionResult
-	if err := m.llm.Complete(ctx, entityExtractionPrompt, userContent, "entity_extraction", entityExtractionSchema, &extraction); err != nil {
-		return fmt.Errorf("extract entities: %w", err)
+	tokens, err := m.llm.Complete(ctx, entityExtractionPrompt, userContent, "entity_extraction", entityExtractionSchema, &extraction)
+	if err != nil {
+		return tokens, fmt.Errorf("extract entities: %w", err)
 	}
 
-	// Upsert entities
+	// Upsert entities and embed their names
 	entityNameToID := make(map[string]string)
 	for _, e := range extraction.Entities {
 		id, err := m.store.UpsertEntity(userID, e.Name, e.Type)
 		if err != nil {
-			return fmt.Errorf("upsert entity %q: %w", e.Name, err)
+			return tokens, fmt.Errorf("upsert entity %q: %w", e.Name, err)
 		}
 		entityNameToID[e.Name] = id
+
+		emb, err := m.embedder.Embed(ctx, e.Name)
+		if err != nil {
+			return tokens, fmt.Errorf("embed entity %q: %w", e.Name, err)
+		}
+		if err := m.store.UpsertEntityEmbedding(id, emb); err != nil {
+			return tokens, fmt.Errorf("store entity embedding %q: %w", e.Name, err)
+		}
 	}
 
 	// Upsert relations
 	for _, r := range extraction.Relations {
 		sourceID, ok := entityNameToID[r.Source]
 		if !ok {
-			// Entity not extracted but referenced in relation — upsert with "other" type
 			id, err := m.store.UpsertEntity(userID, r.Source, "other")
 			if err != nil {
-				return fmt.Errorf("upsert source entity %q: %w", r.Source, err)
+				return tokens, fmt.Errorf("upsert source entity %q: %w", r.Source, err)
 			}
 			sourceID = id
 			entityNameToID[r.Source] = id
@@ -278,18 +297,18 @@ func (m *Memory) addGraph(ctx context.Context, messages []Message, userID string
 		if !ok {
 			id, err := m.store.UpsertEntity(userID, r.Target, "other")
 			if err != nil {
-				return fmt.Errorf("upsert target entity %q: %w", r.Target, err)
+				return tokens, fmt.Errorf("upsert target entity %q: %w", r.Target, err)
 			}
 			targetID = id
 			entityNameToID[r.Target] = id
 		}
 
 		if err := m.store.UpsertRelation(userID, sourceID, r.Relation, targetID); err != nil {
-			return fmt.Errorf("upsert relation: %w", err)
+			return tokens, fmt.Errorf("upsert relation: %w", err)
 		}
 	}
 
-	return nil
+	return tokens, nil
 }
 
 // --- Read Path ---
@@ -349,7 +368,7 @@ func (m *Memory) DeleteAll(ctx context.Context, userID string) error {
 	return m.store.DeleteAllForUser(userID)
 }
 
-// SearchRelations finds relations matching a query for a user.
+// SearchRelations finds relations matching a query for a user via entity embedding similarity.
 func (m *Memory) SearchRelations(ctx context.Context, query string, userID string, limit int) ([]Relation, error) {
 	if userID == "" {
 		return nil, fmt.Errorf("user_id is required")
@@ -357,7 +376,11 @@ func (m *Memory) SearchRelations(ctx context.Context, query string, userID strin
 	if limit <= 0 {
 		limit = 10
 	}
-	return m.store.SearchRelations(query, userID, limit)
+	emb, err := m.embedder.Embed(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("embed query: %w", err)
+	}
+	return m.store.SearchRelations(emb, userID, limit)
 }
 
 // GetAllRelations retrieves all relations for a user.
@@ -372,6 +395,35 @@ func (m *Memory) GetAllRelations(ctx context.Context, userID string, limit int) 
 }
 
 // --- Helpers ---
+
+// maxMessageChars is the approximate character budget for messages (~25K tokens).
+const maxMessageChars = 100_000
+
+// truncateMessages keeps the last N messages that fit within maxChars.
+// Always keeps at least 1 message. Logs a warning if truncation occurs.
+func truncateMessages(messages []Message, maxChars int) []Message {
+	total := 0
+	for _, m := range messages {
+		total += len(m.Role) + len(m.Content) + 3 // "role: content\n"
+	}
+	if total <= maxChars {
+		return messages
+	}
+
+	budget := maxChars
+	start := len(messages)
+	for i := len(messages) - 1; i >= 0; i-- {
+		cost := len(messages[i].Role) + len(messages[i].Content) + 3
+		if budget-cost < 0 && start < len(messages) {
+			break
+		}
+		budget -= cost
+		start = i
+	}
+	log.Printf("truncating conversation from %d to %d messages (%d chars exceeded %d limit)",
+		len(messages), len(messages)-start, total, maxChars)
+	return messages[start:]
+}
 
 func hashFact(text string) string {
 	h := sha256.Sum256([]byte(text))

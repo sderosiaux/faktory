@@ -1,6 +1,7 @@
 package faktory
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -27,6 +28,56 @@ func TestFormatMessages(t *testing.T) {
 	if got != want {
 		t.Errorf("formatMessages = %q, want %q", got, want)
 	}
+}
+
+func TestTruncateMessages(t *testing.T) {
+	t.Run("no-op when under limit", func(t *testing.T) {
+		msgs := []Message{
+			{Role: "user", Content: "Hello"},
+			{Role: "assistant", Content: "Hi"},
+		}
+		got := truncateMessages(msgs, 1000)
+		if len(got) != 2 {
+			t.Errorf("expected 2 messages, got %d", len(got))
+		}
+	})
+
+	t.Run("truncates to fit", func(t *testing.T) {
+		msgs := make([]Message, 10)
+		for i := range msgs {
+			msgs[i] = Message{Role: "user", Content: strings.Repeat("x", 100)}
+		}
+		// Each message is ~107 chars ("user: " + 100 + "\n"). 3 messages ≈ 321 chars.
+		got := truncateMessages(msgs, 350)
+		if len(got) > 3 {
+			t.Errorf("expected <=3 messages, got %d", len(got))
+		}
+		if len(got) == 0 {
+			t.Fatal("expected at least 1 message")
+		}
+	})
+
+	t.Run("keeps at least one message", func(t *testing.T) {
+		msgs := []Message{
+			{Role: "user", Content: strings.Repeat("x", 1000)},
+		}
+		got := truncateMessages(msgs, 10)
+		if len(got) != 1 {
+			t.Errorf("expected 1 message, got %d", len(got))
+		}
+	})
+
+	t.Run("preserves order", func(t *testing.T) {
+		msgs := []Message{
+			{Role: "user", Content: "first"},
+			{Role: "user", Content: "second"},
+			{Role: "user", Content: "third"},
+		}
+		got := truncateMessages(msgs, 50)
+		if len(got) > 0 && got[len(got)-1].Content != "third" {
+			t.Errorf("last message should be 'third', got %q", got[len(got)-1].Content)
+		}
+	})
 }
 
 func TestConfigDefaults(t *testing.T) {
