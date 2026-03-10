@@ -33,6 +33,10 @@ Rules:
 
 const entityExtractionPrompt = `Extract entities and their relationships from the conversation.
 
+Step 1: In "resolved_text", rewrite ONLY the user messages replacing ALL pronouns (he, she, it, they, we, my, his, her, their), anaphora, and deictic references (there, here, this) with their concrete referents from context. Only resolve when the referent is unambiguous.
+Step 2: List ALL entities found in the resolved text.
+Step 3: For EACH pair of entities, determine if a relation exists.
+
 Entity types (use exactly one): person, organization, place, product, event, concept, other.
 
 Relation types (use exactly one):
@@ -48,12 +52,20 @@ Relation types (use exactly one):
 If none of the above fits, pick the closest one. Do NOT invent new relation types.
 
 Rules:
+- Only extract from user messages. Ignore assistant responses.
 - Only extract what is explicitly stated or strongly implied.
 - Do not invent relations.
-- Normalize entity names: capitalize proper nouns.
+- Normalize entity names: capitalize proper nouns (e.g., "alice" → "Alice").
+- Never use pronouns as entity names (no "I", "he", "she", "my", "they").
 - Use the same language as the input for entity names.
-- Be thorough: extract ALL entities and relations mentioned, including pets, allergies, tools, and hobbies.
-- Each person-entity connection deserves its own relation (e.g., "I have a cat named Mochi" → person owns Mochi).`
+- Be thorough: extract ALL entities and relations, including pets, allergies, tools, and hobbies.
+- Each person-entity connection deserves its own relation.
+
+Example:
+Input: "I'm Alice. I have a cat named Mochi. My boyfriend Tom is allergic to cats. He works at Figma."
+resolved_text: "Alice has a cat named Mochi. Alice's boyfriend Tom is allergic to cats. Tom works at Figma."
+entities: Alice (person), Mochi (other), Tom (person), Figma (organization)
+relations: Alice owns Mochi, Alice partner_of Tom, Tom allergic_to cats, Tom works_at Figma`
 
 // --- Response types ---
 
@@ -84,8 +96,9 @@ type ExtractedRelation struct {
 }
 
 type EntityExtractionResult struct {
-	Entities  []ExtractedEntity   `json:"entities"`
-	Relations []ExtractedRelation `json:"relations"`
+	ResolvedText string              `json:"resolved_text"`
+	Entities     []ExtractedEntity   `json:"entities"`
+	Relations    []ExtractedRelation `json:"relations"`
 }
 
 // --- JSON Schemas for structured output ---
@@ -127,6 +140,7 @@ var reconcileSchema = json.RawMessage(`{
 var entityExtractionSchema = json.RawMessage(`{
   "type": "object",
   "properties": {
+    "resolved_text": {"type": "string"},
     "entities": {
       "type": "array",
       "items": {
@@ -162,6 +176,6 @@ var entityExtractionSchema = json.RawMessage(`{
       }
     }
   },
-  "required": ["entities", "relations"],
+  "required": ["resolved_text", "entities", "relations"],
   "additionalProperties": false
 }`)

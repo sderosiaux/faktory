@@ -255,7 +255,7 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID string
 
 func (m *Memory) addGraph(ctx context.Context, messages []Message, userID string) (int, error) {
 	messages = truncateMessages(messages, maxMessageChars)
-	userContent := formatMessages(messages)
+	userContent := formatUserMessages(messages)
 
 	var extraction EntityExtractionResult
 	tokens, err := m.llm.Complete(ctx, entityExtractionPrompt, userContent, "entity_extraction", entityExtractionSchema, &extraction)
@@ -263,44 +263,55 @@ func (m *Memory) addGraph(ctx context.Context, messages []Message, userID string
 		return tokens, fmt.Errorf("extract entities: %w", err)
 	}
 
-	// Upsert entities and embed their names
-	entityNameToID := make(map[string]string)
+	// Upsert entities — skip pronouns, use case-insensitive key for dedup
+	entityKeyToID := make(map[string]string)
 	for _, e := range extraction.Entities {
-		id, err := m.store.UpsertEntity(userID, e.Name, e.Type)
-		if err != nil {
-			return tokens, fmt.Errorf("upsert entity %q: %w", e.Name, err)
+		name := strings.TrimSpace(e.Name)
+		if isPronoun(name) || name == "" {
+			continue
 		}
-		entityNameToID[e.Name] = id
 
-		emb, err := m.embedder.Embed(ctx, e.Name)
+		id, err := m.store.UpsertEntity(userID, name, e.Type)
 		if err != nil {
-			return tokens, fmt.Errorf("embed entity %q: %w", e.Name, err)
+			return tokens, fmt.Errorf("upsert entity %q: %w", name, err)
+		}
+		entityKeyToID[entityKey(name)] = id
+
+		emb, err := m.embedder.Embed(ctx, name)
+		if err != nil {
+			return tokens, fmt.Errorf("embed entity %q: %w", name, err)
 		}
 		if err := m.store.UpsertEntityEmbedding(id, emb); err != nil {
-			return tokens, fmt.Errorf("store entity embedding %q: %w", e.Name, err)
+			return tokens, fmt.Errorf("store entity embedding %q: %w", name, err)
 		}
 	}
 
-	// Upsert relations
+	// Upsert relations — skip if source/target is pronoun
 	for _, r := range extraction.Relations {
-		sourceID, ok := entityNameToID[r.Source]
-		if !ok {
-			id, err := m.store.UpsertEntity(userID, r.Source, "other")
-			if err != nil {
-				return tokens, fmt.Errorf("upsert source entity %q: %w", r.Source, err)
-			}
-			sourceID = id
-			entityNameToID[r.Source] = id
+		source := strings.TrimSpace(r.Source)
+		target := strings.TrimSpace(r.Target)
+		if isPronoun(source) || isPronoun(target) {
+			continue
 		}
 
-		targetID, ok := entityNameToID[r.Target]
+		sourceID, ok := entityKeyToID[entityKey(source)]
 		if !ok {
-			id, err := m.store.UpsertEntity(userID, r.Target, "other")
+			id, err := m.store.UpsertEntity(userID, source, "other")
 			if err != nil {
-				return tokens, fmt.Errorf("upsert target entity %q: %w", r.Target, err)
+				return tokens, fmt.Errorf("upsert source entity %q: %w", source, err)
+			}
+			sourceID = id
+			entityKeyToID[entityKey(source)] = id
+		}
+
+		targetID, ok := entityKeyToID[entityKey(target)]
+		if !ok {
+			id, err := m.store.UpsertEntity(userID, target, "other")
+			if err != nil {
+				return tokens, fmt.Errorf("upsert target entity %q: %w", target, err)
 			}
 			targetID = id
-			entityNameToID[r.Target] = id
+			entityKeyToID[entityKey(target)] = id
 		}
 
 		if err := m.store.UpsertRelation(userID, sourceID, r.Relation, targetID); err != nil {
@@ -439,4 +450,39 @@ func formatMessages(messages []Message) string {
 		sb.WriteString("\n")
 	}
 	return sb.String()
+}
+
+// formatUserMessages returns only user messages (filters out assistant/system noise).
+func formatUserMessages(messages []Message) string {
+	var sb strings.Builder
+	for _, msg := range messages {
+		if msg.Role != "user" {
+			continue
+		}
+		sb.WriteString("user: ")
+		sb.WriteString(msg.Content)
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// entityKey returns a case-insensitive lookup key for entity deduplication.
+func entityKey(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
+}
+
+// isPronoun returns true if the name is a pronoun that shouldn't be an entity.
+var pronouns = map[string]bool{
+	"i": true, "me": true, "my": true, "mine": true, "myself": true,
+	"he": true, "him": true, "his": true, "himself": true,
+	"she": true, "her": true, "hers": true, "herself": true,
+	"it": true, "its": true, "itself": true,
+	"we": true, "us": true, "our": true, "ours": true, "ourselves": true,
+	"they": true, "them": true, "their": true, "theirs": true, "themselves": true,
+	"you": true, "your": true, "yours": true, "yourself": true,
+	"user": true,
+}
+
+func isPronoun(name string) bool {
+	return pronouns[strings.ToLower(strings.TrimSpace(name))]
 }
