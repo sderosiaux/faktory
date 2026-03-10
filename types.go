@@ -159,6 +159,8 @@ type Config struct {
 	Completer      Completer     // Custom LLM completer (overrides LLM* fields when set)
 	TextEmbedder   TextEmbedder  // Custom text embedder (overrides Embed* fields when set)
 
+	DisableGraph bool // Skip entity/relation extraction in Add() (saves 1 LLM call)
+
 	PromptFactExtraction   string // Override fact extraction system prompt
 	PromptReconciliation   string // Override reconciliation system prompt
 	PromptEntityExtraction string // Override entity extraction system prompt

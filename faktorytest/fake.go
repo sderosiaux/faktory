@@ -33,12 +33,13 @@ type RelationResult struct {
 // FakeCompleter is a test double that returns pre-configured results based on
 // the schema name.
 type FakeCompleter struct {
-	Facts     []string
-	Reconcile []ReconcileAction
-	Entities  []EntityResult
-	Relations []RelationResult
-	Tokens    int
-	Errors    map[string]error // schemaName -> error to return (before normal routing)
+	Facts         []string
+	Reconcile     []ReconcileAction
+	ReconcileFunc func(userPrompt string) []ReconcileAction // dynamic reconciliation (overrides Reconcile when set)
+	Entities      []EntityResult
+	Relations     []RelationResult
+	Tokens        int
+	Errors        map[string]error // schemaName -> error to return (before normal routing)
 
 	mu            sync.Mutex
 	SystemPrompts map[string]string // schemaName -> system prompt received
@@ -103,7 +104,11 @@ func (fc *FakeCompleter) Complete(_ context.Context, system, user string, schema
 	case "fact_extraction":
 		payload = map[string]any{"facts": fc.Facts}
 	case "reconcile_memory":
-		payload = map[string]any{"memory": fc.Reconcile}
+		actions := fc.Reconcile
+		if fc.ReconcileFunc != nil {
+			actions = fc.ReconcileFunc(user)
+		}
+		payload = map[string]any{"memory": actions}
 	case "entity_extraction":
 		payload = map[string]any{
 			"resolved_text": "",

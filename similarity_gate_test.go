@@ -14,12 +14,18 @@ import (
 // with the given FakeCompleter and 8-dim FakeEmbedder.
 func newGateTestMemory(t *testing.T, fc *faktorytest.FakeCompleter) *Memory {
 	t.Helper()
+	return newGateTestMemoryOpts(t, fc, false)
+}
+
+func newGateTestMemoryOpts(t *testing.T, fc *faktorytest.FakeCompleter, disableGraph bool) *Memory {
+	t.Helper()
 	db := filepath.Join(t.TempDir(), "test.db")
 	mem, err := New(Config{
 		DBPath:         db,
 		EmbedDimension: 8,
 		Completer:      fc,
 		TextEmbedder:   &faktorytest.FakeEmbedder{Dim: 8},
+		DisableGraph:   disableGraph,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -179,5 +185,89 @@ func TestReconciliationContextCap(t *testing.T) {
 	}
 	if factLines == 0 {
 		t.Error("expected at least some existing facts in reconciliation input")
+	}
+}
+
+func TestChunkedReconciliation(t *testing.T) {
+	// Generate 25 extracted facts: 15 will need reconciliation, 10 will be novel.
+	const totalFacts = 25
+	const reconFacts = 15
+
+	var facts []string
+	for i := 0; i < totalFacts; i++ {
+		facts = append(facts, fmt.Sprintf("fact-%d", i))
+	}
+
+	// ReconcileFunc parses the "New facts:" section from the user prompt and
+	// returns an ADD action for each new fact it sees.
+	reconcileFunc := func(userPrompt string) []faktorytest.ReconcileAction {
+		parts := strings.SplitN(userPrompt, "\n\nNew facts:\n", 2)
+		if len(parts) != 2 {
+			return nil
+		}
+		var actions []faktorytest.ReconcileAction
+		for _, line := range strings.Split(strings.TrimSpace(parts[1]), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			actions = append(actions, faktorytest.ReconcileAction{
+				Text:  line,
+				Event: "ADD",
+			})
+		}
+		return actions
+	}
+
+	fc := &faktorytest.FakeCompleter{
+		Facts:         facts,
+		ReconcileFunc: reconcileFunc,
+		Entities:      []faktorytest.EntityResult{},
+		Tokens:        10,
+	}
+	mem := newGateTestMemoryOpts(t, fc, true)
+
+	// Seed existing facts so the first 15 extracted facts find similar matches
+	// (embedding matches force score >= 0.5, routing them to reconciliation).
+	for i := 0; i < reconFacts; i++ {
+		seedFactWithEmbedding(t, mem, "u1", "",
+			fmt.Sprintf("old-fact-%d", i),
+			fmt.Sprintf("fact-%d", i))
+	}
+
+	result, err := mem.Add(context.Background(), []Message{
+		{Role: "user", Content: "25 facts about me"},
+	}, "u1")
+	if err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+
+	// All 25 should be added (10 novel + 15 via reconciliation ADD).
+	if len(result.Added) != totalFacts {
+		t.Errorf("Added = %d, want %d", len(result.Added), totalFacts)
+	}
+
+	// Reconciliation should have been called at least 2 times (15 > maxReconcileChunk=10).
+	calls := fc.GetCallCount("reconcile_memory")
+	if calls < 2 {
+		t.Errorf("reconcile_memory called %d times, want >= 2 (chunked)", calls)
+	}
+
+	// Verify exactly 2 chunks: ceil(15/10) = 2.
+	if calls != 2 {
+		t.Errorf("reconcile_memory called %d times, want exactly 2 for 15 candidates with chunk size 10", calls)
+	}
+
+	// Verify all facts are in the store.
+	stored, err := mem.store.GetAllFacts("u1", "", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 15 seeded (old-fact-*) + 25 added = 40, but reconcile ADD creates new rows
+	// while the old seeded rows remain. The 10 novel are inserted directly.
+	// The 15 reconciled are ADD actions (new inserts, old ones untouched).
+	// Total stored = 15 (seeded) + 10 (novel) + 15 (reconcile ADD) = 40.
+	if len(stored) != reconFacts+totalFacts {
+		t.Errorf("stored facts = %d, want %d", len(stored), reconFacts+totalFacts)
 	}
 }

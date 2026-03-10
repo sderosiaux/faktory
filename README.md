@@ -161,6 +161,8 @@ faktory.Config{
     EmbedDimension: 256,                             // vector dimension (Matryoshka truncation)
     Logger:         slog.Default(),                  // nil = silent (default)
 
+    DisableGraph: false, // skip entity/relation extraction (saves 1 LLM call per Add)
+
     // Custom prompts — override LLM system prompts for domain-specific tuning
     PromptFactExtraction:   "",  // fact extraction (empty = default)
     PromptReconciliation:   "",  // fact reconciliation (empty = default)
