@@ -60,12 +60,12 @@ type Entity struct {
 // ExportRecord is a single line in a JSONL export file.
 type ExportRecord struct {
 	Type       string `json:"type"`                  // "fact", "entity", "relation"
-	Text       string `json:"text,omitempty"`         // facts
-	Name       string `json:"name,omitempty"`         // entities
-	EntityType string `json:"entity_type,omitempty"`  // entities
-	Source     string `json:"source,omitempty"`       // relations
-	Relation   string `json:"relation,omitempty"`     // relations
-	Target     string `json:"target,omitempty"`       // relations
+	Text       string `json:"text,omitempty"`        // facts
+	Name       string `json:"name,omitempty"`        // entities
+	EntityType string `json:"entity_type,omitempty"` // entities
+	Source     string `json:"source,omitempty"`      // relations
+	Relation   string `json:"relation,omitempty"`    // relations
+	Target     string `json:"target,omitempty"`      // relations
 }
 
 // Config holds all configuration for a Memory instance.
