@@ -22,6 +22,20 @@ func newPromptTestMemory(t *testing.T, fc *faktorytest.FakeCompleter, cfg Config
 	return mem
 }
 
+// seedSimilarFact inserts a fact with different text but the same embedding as
+// matchText, so similarity search returns it with score 1.0 and triggers
+// reconciliation instead of the novel fast-path.
+func seedSimilarFact(t *testing.T, mem *Memory, userID, storedText, matchText string) {
+	t.Helper()
+	emb, err := mem.embedder.Embed(context.Background(), matchText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mem.store.InsertFact(userID, "", storedText, hashFact(storedText), emb); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func defaultFakeCompleter() *faktorytest.FakeCompleter {
 	return &faktorytest.FakeCompleter{
 		Facts: []string{"likes Go"},
@@ -56,6 +70,10 @@ func TestCustomReconciliationPrompt(t *testing.T) {
 	custom := "my custom reconciliation prompt"
 	mem := newPromptTestMemory(t, fc, Config{PromptReconciliation: custom})
 
+	// Seed store with a fact that shares the same embedding as "likes Go"
+	// so similarity gate triggers reconciliation.
+	seedSimilarFact(t, mem, "u1", "old: likes Go", "likes Go")
+
 	_, err := mem.Add(context.Background(), []Message{{Role: "user", Content: "hello"}}, "u1")
 	if err != nil {
 		t.Fatal(err)
@@ -86,6 +104,10 @@ func TestCustomEntityExtractionPrompt(t *testing.T) {
 func TestDefaultPromptsWhenCustomEmpty(t *testing.T) {
 	fc := defaultFakeCompleter()
 	mem := newPromptTestMemory(t, fc, Config{})
+
+	// Seed store with a fact that shares the same embedding as "likes Go"
+	// so similarity gate triggers reconciliation.
+	seedSimilarFact(t, mem, "u1", "old: likes Go", "likes Go")
 
 	_, err := mem.Add(context.Background(), []Message{{Role: "user", Content: "hello"}}, "u1")
 	if err != nil {

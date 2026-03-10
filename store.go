@@ -489,18 +489,19 @@ func (s *Store) DeleteAllForUser(userID, namespace string) error {
 
 // CleanupStaleRelations removes relations where the source or target entity name
 // appears in deletedTexts but not in any remaining fact for the user.
+// Uses SQL-based containment checks instead of loading all facts into memory.
 func (s *Store) CleanupStaleRelations(userID, namespace string, deletedTexts []string) (int, error) {
 	if len(deletedTexts) == 0 {
 		return 0, nil
 	}
 
-	// Get all entity names for this user+namespace
+	// Get entities for this user+namespace
 	entities, err := s.GetAllEntities(userID, namespace, 100_000)
 	if err != nil {
 		return 0, err
 	}
 
-	// Find entity names mentioned in deleted fact texts
+	// Find entity names mentioned in deleted texts (Go-side, small set)
 	var affectedEntityIDs []string
 	for _, e := range entities {
 		nameLower := strings.ToLower(e.Name)
@@ -516,27 +517,30 @@ func (s *Store) CleanupStaleRelations(userID, namespace string, deletedTexts []s
 		return 0, nil
 	}
 
-	// For each affected entity, check if it still appears in any remaining fact
-	remainingFacts, err := s.GetAllFacts(userID, namespace, 100_000)
-	if err != nil {
-		return 0, err
+	// Build a set for O(1) lookup
+	affected := make(map[string]bool, len(affectedEntityIDs))
+	for _, id := range affectedEntityIDs {
+		affected[id] = true
 	}
 
-	// Build a combined text of all remaining facts for quick contains check
-	var allText strings.Builder
-	for _, f := range remainingFacts {
-		allText.WriteString(strings.ToLower(f.Text))
-		allText.WriteString(" ")
-	}
-	remainingText := allText.String()
-
-	// Find entities that no longer appear in any fact
+	// For each affected entity, check via SQL if it still appears in any remaining fact.
+	// This replaces loading ALL facts into memory.
 	var orphanedIDs []string
 	for _, e := range entities {
-		for _, aid := range affectedEntityIDs {
-			if e.ID == aid && !strings.Contains(remainingText, strings.ToLower(e.Name)) {
-				orphanedIDs = append(orphanedIDs, e.ID)
-			}
+		if !affected[e.ID] {
+			continue
+		}
+
+		var count int
+		err := s.db.QueryRow(
+			"SELECT COUNT(*) FROM facts WHERE user_id = ? AND namespace = ? AND LOWER(text) LIKE '%' || ? || '%'",
+			userID, namespace, strings.ToLower(e.Name),
+		).Scan(&count)
+		if err != nil {
+			return 0, fmt.Errorf("check entity %q in facts: %w", e.Name, err)
+		}
+		if count == 0 {
+			orphanedIDs = append(orphanedIDs, e.ID)
 		}
 	}
 
@@ -636,14 +640,19 @@ func (s *Store) UpsertEntityEmbedding(entityID string, embedding []float32) erro
 	if err != nil {
 		return err
 	}
-	// Delete old embedding if exists, then insert new
-	if _, err := s.db.Exec("DELETE FROM entity_embeddings WHERE id = ?", entityID); err != nil {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("DELETE FROM entity_embeddings WHERE id = ?", entityID); err != nil {
 		return fmt.Errorf("delete old entity embedding: %w", err)
 	}
-	if _, err := s.db.Exec("INSERT INTO entity_embeddings (id, embedding) VALUES (?, ?)", entityID, string(embJSON)); err != nil {
+	if _, err := tx.Exec("INSERT INTO entity_embeddings (id, embedding) VALUES (?, ?)", entityID, string(embJSON)); err != nil {
 		return fmt.Errorf("insert entity embedding: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // --- Relations ---

@@ -260,6 +260,102 @@ func TestEntityAndRelationUpsert(t *testing.T) {
 	}
 }
 
+func TestUpsertEntityEmbedding_Transactional(t *testing.T) {
+	s := tempStore(t, 4)
+
+	entityID, err := s.UpsertEntity("alice", "", "Alice", "person")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Seed an initial embedding so every goroutine does DELETE+INSERT
+	if err := s.UpsertEntityEmbedding(entityID, []float32{0, 0, 0, 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	const goroutines = 20
+	errs := make(chan error, goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func(n int) {
+			v := float32(n) / float32(goroutines)
+			errs <- s.UpsertEntityEmbedding(entityID, []float32{v, 1 - v, v, 1 - v})
+		}(i)
+	}
+
+	for i := 0; i < goroutines; i++ {
+		if err := <-errs; err != nil {
+			t.Errorf("goroutine error: %v", err)
+		}
+	}
+
+	// Embedding must be present (never lost between DELETE and INSERT)
+	ids, err := s.SearchEntityIDs([]float32{0.5, 0.5, 0.5, 0.5}, "alice", "", 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 1 || ids[0] != entityID {
+		t.Errorf("expected exactly entity %s, got %v", entityID, ids)
+	}
+}
+
+func TestCleanupStaleRelations_SQL(t *testing.T) {
+	s := tempStore(t, 4)
+	emb := []float32{0.1, 0.2, 0.3, 0.4}
+
+	// Insert two facts mentioning Alice and Acme
+	id1, _ := s.InsertFact("alice", "", "Alice works at Acme", "h1", emb)
+	s.InsertFact("alice", "", "Alice lives in Paris", "h2", emb)
+
+	// Create entities and a relation
+	aliceID, _ := s.UpsertEntity("alice", "", "Alice", "person")
+	acmeID, _ := s.UpsertEntity("alice", "", "Acme", "organization")
+	parisID, _ := s.UpsertEntity("alice", "", "Paris", "place")
+	s.UpsertRelation("alice", "", aliceID, "works_at", acmeID)
+	s.UpsertRelation("alice", "", aliceID, "lives_in", parisID)
+
+	// Delete the fact mentioning Acme
+	s.DeleteFact(id1)
+
+	// Cleanup: Acme no longer in any remaining fact, Alice and Paris still are
+	deleted, err := s.CleanupStaleRelations("alice", "", []string{"Alice works at Acme"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// works_at relation should be deleted (Acme orphaned)
+	if deleted != 1 {
+		t.Errorf("deleted = %d, want 1", deleted)
+	}
+
+	// lives_in relation should remain (Alice and Paris still in remaining fact)
+	rels, _ := s.GetAllRelations("alice", "", 100)
+	if len(rels) != 1 {
+		t.Fatalf("expected 1 remaining relation, got %d", len(rels))
+	}
+	if rels[0].Relation != "lives_in" {
+		t.Errorf("remaining relation = %q, want %q", rels[0].Relation, "lives_in")
+	}
+
+	// No-op when deletedTexts is empty
+	n, err := s.CleanupStaleRelations("alice", "", nil)
+	if err != nil || n != 0 {
+		t.Errorf("empty deletedTexts: n=%d err=%v", n, err)
+	}
+
+	// No-op when entity still appears in another fact
+	s.InsertFact("alice", "", "Alice met Bob", "h3", emb)
+	bobID, _ := s.UpsertEntity("alice", "", "Bob", "person")
+	s.UpsertRelation("alice", "", aliceID, "met", bobID)
+
+	n, err = s.CleanupStaleRelations("alice", "", []string{"Alice met Bob"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Alice still in "Alice lives in Paris", Bob only in "Alice met Bob" which is still present
+	if n != 0 {
+		t.Errorf("expected 0 deletions when entities still referenced, got %d", n)
+	}
+}
+
 func TestSearchRelations(t *testing.T) {
 	s := tempStore(t, 4)
 

@@ -186,120 +186,194 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID, names
 		if err != nil {
 			return nil, fmt.Errorf("search similar: %w", err)
 		}
+		// Filter out low-similarity results
+		var filtered []Fact
+		for _, f := range similar {
+			if f.Score >= 0.5 {
+				filtered = append(filtered, f)
+			}
+		}
 		candidates = append(candidates, candidateFact{
 			text:      factText,
 			hash:      hashes[i],
 			embedding: embeddings[i],
-			similar:   similar,
+			similar:   filtered,
 		})
 	}
 
-	// Collect all similar existing facts, deduplicate (stable order)
-	existingByID := make(map[string]Fact)
-	var existingOrder []string
-	for _, c := range candidates {
-		for _, f := range c.similar {
-			if _, seen := existingByID[f.ID]; !seen {
-				existingByID[f.ID] = f
-				existingOrder = append(existingOrder, f.ID)
-			}
-		}
-	}
-
-	// Map UUIDs to sequential integers (deterministic via existingOrder)
-	idToInt := make(map[string]string)
-	intToID := make(map[string]string)
-	for idx, id := range existingOrder {
-		intStr := fmt.Sprintf("%d", idx)
-		idToInt[id] = intStr
-		intToID[intStr] = id
-	}
-
-	var existingLines []string
-	for _, id := range existingOrder {
-		f := existingByID[id]
-		existingLines = append(existingLines, fmt.Sprintf("id: %s, text: %s", idToInt[id], f.Text))
-	}
-
-	var newLines []string
-	for _, c := range candidates {
-		newLines = append(newLines, c.text)
-	}
-
-	reconcileInput := fmt.Sprintf("Existing facts:\n%s\n\nNew facts:\n%s",
-		strings.Join(existingLines, "\n"),
-		strings.Join(newLines, "\n"))
-
-	// Reconcile via LLM
-	reconPrompt := reconcilePrompt
-	if m.cfg.PromptReconciliation != "" {
-		reconPrompt = m.cfg.PromptReconciliation
-	}
-
-	var reconciliation ReconcileResult
-	tokens, err = m.llm.Complete(ctx, reconPrompt, reconcileInput, "reconcile_memory", reconcileSchema, &reconciliation)
-	totalTokens += tokens
-	if err != nil {
-		return nil, fmt.Errorf("reconcile: %w", err)
-	}
-
+	// Build embedding map for all candidates (needed for both novel and reconciled paths)
 	candidateEmbs := make(map[string][]float32, len(candidates))
 	for _, c := range candidates {
 		candidateEmbs[c.text] = c.embedding
 	}
 
-	// Execute reconciliation actions
+	// Separate novel facts (no similar existing) from those needing reconciliation
 	result := &AddResult{}
+	var needsReconciliation []candidateFact
+	for _, c := range candidates {
+		if len(c.similar) == 0 {
+			// Novel fact: directly insert without reconciliation
+			id, err := m.store.InsertFact(userID, namespace, c.text, c.hash, c.embedding)
+			if err != nil {
+				return nil, fmt.Errorf("insert novel fact: %w", err)
+			}
+			result.Added = append(result.Added, Fact{ID: id, Text: c.text, UserID: userID})
+		} else {
+			needsReconciliation = append(needsReconciliation, c)
+		}
+	}
+
 	var deletedTexts []string
-	for _, action := range reconciliation.Memory {
-		switch action.Event {
-		case "ADD":
-			emb, ok := candidateEmbs[action.Text]
-			if !ok {
-				var err error
-				emb, err = m.embedder.Embed(ctx, action.Text)
-				if err != nil {
-					return nil, fmt.Errorf("embed new fact: %w", err)
+
+	// Only run reconciliation if there are candidates with similar existing facts
+	if len(needsReconciliation) > 0 {
+		// Collect all similar existing facts, deduplicate (stable order)
+		existingByID := make(map[string]Fact)
+		var existingOrder []string
+		for _, c := range needsReconciliation {
+			for _, f := range c.similar {
+				if _, seen := existingByID[f.ID]; !seen {
+					existingByID[f.ID] = f
+					existingOrder = append(existingOrder, f.ID)
 				}
 			}
-			id, err := m.store.InsertFact(userID, namespace, action.Text, hashFact(action.Text), emb)
-			if err != nil {
-				return nil, fmt.Errorf("insert fact: %w", err)
-			}
-			result.Added = append(result.Added, Fact{ID: id, Text: action.Text, UserID: userID})
+		}
 
-		case "UPDATE":
-			realID, ok := intToID[action.ID]
-			if !ok {
-				continue
+		// Context cap: keep only top 30 existing facts by highest similarity
+		const maxReconcileContext = 30
+		if len(existingByID) > maxReconcileContext {
+			m.log.Warn("reconciliation context capped", "total", len(existingByID), "kept", maxReconcileContext)
+			// Rank all existing facts by highest similarity across all candidates
+			type scoredFact struct {
+				id    string
+				score float64
 			}
-			if old, exists := existingByID[realID]; exists {
-				deletedTexts = append(deletedTexts, old.Text)
+			var scored []scoredFact
+			bestScore := make(map[string]float64)
+			for _, c := range needsReconciliation {
+				for _, f := range c.similar {
+					if f.Score > bestScore[f.ID] {
+						bestScore[f.ID] = f.Score
+					}
+				}
 			}
-			emb, err := m.embedder.Embed(ctx, action.Text)
-			if err != nil {
-				return nil, fmt.Errorf("embed updated fact: %w", err)
+			for id, s := range bestScore {
+				scored = append(scored, scoredFact{id: id, score: s})
 			}
-			if err := m.store.UpdateFact(realID, action.Text, hashFact(action.Text), emb); err != nil {
-				return nil, fmt.Errorf("update fact: %w", err)
+			// Sort descending by score
+			for i := 0; i < len(scored); i++ {
+				for j := i + 1; j < len(scored); j++ {
+					if scored[j].score > scored[i].score {
+						scored[i], scored[j] = scored[j], scored[i]
+					}
+				}
 			}
-			result.Updated = append(result.Updated, Fact{ID: realID, Text: action.Text, UserID: userID})
+			// Keep top N
+			kept := make(map[string]bool)
+			for i := 0; i < maxReconcileContext && i < len(scored); i++ {
+				kept[scored[i].id] = true
+			}
+			// Rebuild existingByID and existingOrder
+			newExistingByID := make(map[string]Fact)
+			var newExistingOrder []string
+			for _, id := range existingOrder {
+				if kept[id] {
+					newExistingByID[id] = existingByID[id]
+					newExistingOrder = append(newExistingOrder, id)
+				}
+			}
+			existingByID = newExistingByID
+			existingOrder = newExistingOrder
+		}
 
-		case "DELETE":
-			realID, ok := intToID[action.ID]
-			if !ok {
-				continue
-			}
-			if old, exists := existingByID[realID]; exists {
-				deletedTexts = append(deletedTexts, old.Text)
-			}
-			if err := m.store.DeleteFact(realID); err != nil {
-				return nil, fmt.Errorf("delete fact: %w", err)
-			}
-			result.Deleted = append(result.Deleted, realID)
+		// Map UUIDs to sequential integers (deterministic via existingOrder)
+		idToInt := make(map[string]string)
+		intToID := make(map[string]string)
+		for idx, id := range existingOrder {
+			intStr := fmt.Sprintf("%d", idx)
+			idToInt[id] = intStr
+			intToID[intStr] = id
+		}
 
-		case "NOOP":
-			result.Noops++
+		var existingLines []string
+		for _, id := range existingOrder {
+			f := existingByID[id]
+			existingLines = append(existingLines, fmt.Sprintf("id: %s, text: %s", idToInt[id], f.Text))
+		}
+
+		var newLines []string
+		for _, c := range needsReconciliation {
+			newLines = append(newLines, c.text)
+		}
+
+		reconcileInput := fmt.Sprintf("Existing facts:\n%s\n\nNew facts:\n%s",
+			strings.Join(existingLines, "\n"),
+			strings.Join(newLines, "\n"))
+
+		// Reconcile via LLM
+		reconPrompt := reconcilePrompt
+		if m.cfg.PromptReconciliation != "" {
+			reconPrompt = m.cfg.PromptReconciliation
+		}
+
+		var reconciliation ReconcileResult
+		tokens, err = m.llm.Complete(ctx, reconPrompt, reconcileInput, "reconcile_memory", reconcileSchema, &reconciliation)
+		totalTokens += tokens
+		if err != nil {
+			return nil, fmt.Errorf("reconcile: %w", err)
+		}
+
+		// Execute reconciliation actions
+		for _, action := range reconciliation.Memory {
+			switch action.Event {
+			case "ADD":
+				emb, ok := candidateEmbs[action.Text]
+				if !ok {
+					var err error
+					emb, err = m.embedder.Embed(ctx, action.Text)
+					if err != nil {
+						return nil, fmt.Errorf("embed new fact: %w", err)
+					}
+				}
+				id, err := m.store.InsertFact(userID, namespace, action.Text, hashFact(action.Text), emb)
+				if err != nil {
+					return nil, fmt.Errorf("insert fact: %w", err)
+				}
+				result.Added = append(result.Added, Fact{ID: id, Text: action.Text, UserID: userID})
+
+			case "UPDATE":
+				realID, ok := intToID[action.ID]
+				if !ok {
+					continue
+				}
+				if old, exists := existingByID[realID]; exists {
+					deletedTexts = append(deletedTexts, old.Text)
+				}
+				emb, err := m.embedder.Embed(ctx, action.Text)
+				if err != nil {
+					return nil, fmt.Errorf("embed updated fact: %w", err)
+				}
+				if err := m.store.UpdateFact(realID, action.Text, hashFact(action.Text), emb); err != nil {
+					return nil, fmt.Errorf("update fact: %w", err)
+				}
+				result.Updated = append(result.Updated, Fact{ID: realID, Text: action.Text, UserID: userID})
+
+			case "DELETE":
+				realID, ok := intToID[action.ID]
+				if !ok {
+					continue
+				}
+				if old, exists := existingByID[realID]; exists {
+					deletedTexts = append(deletedTexts, old.Text)
+				}
+				if err := m.store.DeleteFact(realID); err != nil {
+					return nil, fmt.Errorf("delete fact: %w", err)
+				}
+				result.Deleted = append(result.Deleted, realID)
+
+			case "NOOP":
+				result.Noops++
+			}
 		}
 	}
 

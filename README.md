@@ -158,7 +158,7 @@ faktory.Config{
     LLMAPIKey:      "sk-...",                        // required
     LLMModel:       "gpt-4o-mini",                  // chat model
     EmbedModel:     "text-embedding-3-small",        // embedding model
-    EmbedDimension: 1536,                            // vector dimension
+    EmbedDimension: 256,                             // vector dimension (Matryoshka truncation)
     Logger:         slog.Default(),                  // nil = silent (default)
 
     // Custom prompts — override LLM system prompts for domain-specific tuning
@@ -177,7 +177,7 @@ Or via env vars for the CLI/MCP server:
 | `FAKTORY_API_KEY` | (required) |
 | `FAKTORY_MODEL` | `gpt-4o-mini` |
 | `FAKTORY_EMBED_MODEL` | `text-embedding-3-small` |
-| `FAKTORY_EMBED_DIM` | `1536` |
+| `FAKTORY_EMBED_DIM` | `256` |
 
 Works with Ollama, vLLM, Together, Groq — anything that speaks the OpenAI chat/embedding API.
 
@@ -235,6 +235,7 @@ Tools: `memory_add`, `memory_recall`, `memory_search`, `memory_profile`, `memory
 - **Lazy profiles** — Generated on read, cached until facts change. No LLM calls on Add()
 - **Silent by default** — No logging unless you pass a `*slog.Logger`. Libraries shouldn't pollute stderr
 - **Custom prompts over plugins** — Override extraction/reconciliation prompts via Config for domain tuning. No plugin system needed
+- **256-dim default** — text-embedding-3-small supports Matryoshka truncation. 256 dimensions retain quality for short fact strings with 6x less storage. Override with `EmbedDimension: 1536` if needed
 - **Namespace scoping** — Per-call `WithNamespace()` adds a second isolation dimension beyond user_id
 
 ## Testing

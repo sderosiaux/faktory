@@ -91,7 +91,7 @@ func TestConfigDefaults(t *testing.T) {
 	if cfg.LLMModel != "gpt-4o-mini" {
 		t.Errorf("LLMModel = %q", cfg.LLMModel)
 	}
-	if cfg.EmbedDimension != 1536 {
+	if cfg.EmbedDimension != 256 {
 		t.Errorf("EmbedDimension = %d", cfg.EmbedDimension)
 	}
 

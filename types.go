@@ -152,7 +152,7 @@ type Config struct {
 	LLMAPIKey      string        // API key for LLM
 	LLMModel       string        // Model name for chat completions (e.g., "gpt-4o-mini")
 	EmbedModel     string        // Model name for embeddings (e.g., "text-embedding-3-small")
-	EmbedDimension int           // Embedding vector dimension (e.g., 1536)
+	EmbedDimension int           // Embedding vector dimension (default: 256, Matryoshka truncation)
 	Logger         *slog.Logger  // Structured logger (default: silent)
 	HTTPTimeout    time.Duration // Override default 30s timeout (0 = use default)
 	HTTPClient     *http.Client  // Fully custom HTTP client (skips timeout and retry when set)
@@ -194,7 +194,7 @@ func (c Config) withDefaults() Config {
 		c.EmbedModel = "text-embedding-3-small"
 	}
 	if c.EmbedDimension == 0 {
-		c.EmbedDimension = 1536
+		c.EmbedDimension = 256
 	}
 	if c.Logger == nil {
 		c.Logger = nopLogger()
