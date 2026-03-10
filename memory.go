@@ -3,6 +3,7 @@ package faktory
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
@@ -263,6 +264,40 @@ func (m *Memory) addGraph(ctx context.Context, messages []Message, userID string
 		return tokens, fmt.Errorf("extract entities: %w", err)
 	}
 
+	// Validate extraction — retry once on errors, log warnings
+	issues := validateExtraction(&extraction)
+	if len(issues.warnings) > 0 {
+		log.Printf("entity extraction warnings: %s", strings.Join(issues.warnings, "; "))
+	}
+	if len(issues.errors) > 0 {
+		log.Printf("entity extraction has %d errors, requesting correction: %s", len(issues.errors), strings.Join(issues.errors, "; "))
+
+		previousJSON, _ := json.Marshal(extraction)
+		correction := fmt.Sprintf(
+			"Your previous extraction has %d issues:\n- %s\n\nPlease fix ALL issues and return the corrected extraction.",
+			len(issues.errors), strings.Join(issues.errors, "\n- "),
+		)
+
+		var corrected EntityExtractionResult
+		retryTokens, retryErr := m.llm.CompleteWithCorrection(
+			ctx, entityExtractionPrompt, userContent, string(previousJSON), correction,
+			"entity_extraction", entityExtractionSchema, &corrected,
+		)
+		tokens += retryTokens
+
+		if retryErr == nil {
+			newIssues := validateExtraction(&corrected)
+			if len(newIssues.errors) < len(issues.errors) {
+				extraction = corrected
+			}
+			if len(newIssues.errors) > 0 {
+				log.Printf("correction still has %d errors (down from %d), proceeding with best result", len(newIssues.errors), len(issues.errors))
+			}
+		} else {
+			log.Printf("correction request failed: %v, using original extraction", retryErr)
+		}
+	}
+
 	// Upsert entities — skip pronouns, use case-insensitive key for dedup
 	entityKeyToID := make(map[string]string)
 	for _, e := range extraction.Entities {
@@ -485,4 +520,77 @@ var pronouns = map[string]bool{
 
 func isPronoun(name string) bool {
 	return pronouns[strings.ToLower(strings.TrimSpace(name))]
+}
+
+// --- Extraction Validator ---
+
+// extractionIssues holds categorized validation results.
+type extractionIssues struct {
+	errors   []string // serious: trigger a repass
+	warnings []string // cosmetic: log but don't retry
+}
+
+// validateExtraction checks an entity extraction result for rule violations.
+func validateExtraction(e *EntityExtractionResult) extractionIssues {
+	var issues extractionIssues
+
+	// Build entity name set for referential integrity checks
+	entityNames := make(map[string]bool)
+	for _, ent := range e.Entities {
+		entityNames[entityKey(ent.Name)] = true
+	}
+
+	// Error: resolved_text must not be empty
+	if strings.TrimSpace(e.ResolvedText) == "" {
+		issues.errors = append(issues.errors, "resolved_text is empty — you must rewrite user messages with pronouns resolved")
+	}
+
+	// Error: no pronoun entity names
+	for _, ent := range e.Entities {
+		if isPronoun(ent.Name) {
+			issues.errors = append(issues.errors, fmt.Sprintf("entity %q is a pronoun — resolve it to a concrete name", ent.Name))
+		}
+		if strings.TrimSpace(ent.Name) == "" {
+			issues.errors = append(issues.errors, "entity has an empty name")
+		}
+	}
+
+	// Error: relation source/target must not be a pronoun
+	for _, r := range e.Relations {
+		if isPronoun(r.Source) {
+			issues.errors = append(issues.errors, fmt.Sprintf("relation source %q is a pronoun — use the resolved entity name", r.Source))
+		}
+		if isPronoun(r.Target) {
+			issues.errors = append(issues.errors, fmt.Sprintf("relation target %q is a pronoun — use the resolved entity name", r.Target))
+		}
+	}
+
+	// Error: no self-referential relations
+	for _, r := range e.Relations {
+		if entityKey(r.Source) == entityKey(r.Target) {
+			issues.errors = append(issues.errors, fmt.Sprintf("relation %s --%s--> %s is self-referential", r.Source, r.Relation, r.Target))
+		}
+	}
+
+	// Error: duplicate entities (same name, different case)
+	seen := make(map[string]string)
+	for _, ent := range e.Entities {
+		k := entityKey(ent.Name)
+		if prev, exists := seen[k]; exists && prev != ent.Name {
+			issues.errors = append(issues.errors, fmt.Sprintf("duplicate entity: %q and %q are the same — use consistent casing", prev, ent.Name))
+		}
+		seen[k] = ent.Name
+	}
+
+	// Warning: relation source/target not in entities list (handled by auto-create)
+	for _, r := range e.Relations {
+		if !entityNames[entityKey(r.Source)] && !isPronoun(r.Source) {
+			issues.warnings = append(issues.warnings, fmt.Sprintf("relation source %q not in entities list", r.Source))
+		}
+		if !entityNames[entityKey(r.Target)] && !isPronoun(r.Target) {
+			issues.warnings = append(issues.warnings, fmt.Sprintf("relation target %q not in entities list", r.Target))
+		}
+	}
+
+	return issues
 }

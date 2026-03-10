@@ -60,12 +60,13 @@ Rules:
 - Use the same language as the input for entity names.
 - Be thorough: extract ALL entities and relations, including pets, allergies, tools, and hobbies.
 - Each person-entity connection deserves its own relation.
+- When items are listed together (e.g., "I use Python and Rust"), create a SEPARATE relation for EACH item.
 
 Example:
-Input: "I'm Alice. I have a cat named Mochi. My boyfriend Tom is allergic to cats. He works at Figma."
-resolved_text: "Alice has a cat named Mochi. Alice's boyfriend Tom is allergic to cats. Tom works at Figma."
-entities: Alice (person), Mochi (other), Tom (person), Figma (organization)
-relations: Alice owns Mochi, Alice partner_of Tom, Tom allergic_to cats, Tom works_at Figma`
+Input: "I'm Alice. I have a cat named Mochi. My boyfriend Tom is allergic to cats. He works at Figma. I use Python and Rust."
+resolved_text: "Alice has a cat named Mochi. Alice's boyfriend Tom is allergic to cats. Tom works at Figma. Alice uses Python and Rust."
+entities: Alice (person), Mochi (other), Tom (person), Figma (organization), Python (product), Rust (product)
+relations: Alice owns Mochi, Alice partner_of Tom, Tom allergic_to cats, Tom works_at Figma, Alice uses Python, Alice uses Rust`
 
 // --- Response types ---
 

@@ -117,6 +117,42 @@ func (l *LLM) Complete(ctx context.Context, system, user string, schemaName stri
 	return totalTokens, nil
 }
 
+// CompleteWithCorrection sends a correction request: re-sends the original conversation
+// plus the previous LLM response and a correction prompt. Returns accumulated tokens.
+func (l *LLM) CompleteWithCorrection(ctx context.Context, system, user, previousResponse, correction string, schemaName string, schema json.RawMessage, result any) (int, error) {
+	messages := []chatMessage{
+		{Role: "system", Content: system},
+		{Role: "user", Content: user},
+		{Role: "assistant", Content: previousResponse},
+		{Role: "user", Content: correction},
+	}
+
+	var rf *responseFormat
+	if l.useJSONObject {
+		rf = &responseFormat{Type: "json_object"}
+	} else {
+		rf = &responseFormat{
+			Type: "json_schema",
+			JSONSchema: &jsonSchemaSpec{
+				Name:   schemaName,
+				Strict: true,
+				Schema: schema,
+			},
+		}
+	}
+
+	raw, tokens, err := l.doRequest(ctx, messages, rf)
+	if err != nil {
+		return tokens, err
+	}
+
+	if err := json.Unmarshal([]byte(raw), result); err != nil {
+		return tokens, fmt.Errorf("parse correction response: %w\nraw: %s", err, raw)
+	}
+
+	return tokens, nil
+}
+
 func (l *LLM) doRequest(ctx context.Context, messages []chatMessage, rf *responseFormat) (string, int, error) {
 	req := chatRequest{
 		Model:          l.model,
