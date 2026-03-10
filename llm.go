@@ -16,6 +16,7 @@ type LLM struct {
 	httpClient *http.Client
 	// useJSONObject is set to true if json_schema mode fails (fallback for Ollama/Groq)
 	useJSONObject bool
+	temperature   float64
 }
 
 func NewLLM(baseURL, apiKey, model string) *LLM {
@@ -157,7 +158,7 @@ func (l *LLM) doRequest(ctx context.Context, messages []chatMessage, rf *respons
 	req := chatRequest{
 		Model:          l.model,
 		Messages:       messages,
-		Temperature:    0,
+		Temperature:    l.temperature,
 		ResponseFormat: rf,
 	}
 

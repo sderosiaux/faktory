@@ -33,8 +33,8 @@ Rules:
 
 const entityExtractionPrompt = `Extract entities and their relationships from the conversation.
 
-Step 1: In "resolved_text", rewrite ONLY the user messages replacing ALL pronouns (he, she, it, they, we, my, his, her, their), anaphora, and deictic references (there, here, this) with their concrete referents from context. Only resolve when the referent is unambiguous.
-Step 2: List ALL entities found in the resolved text.
+Step 1: In "resolved_text", copy the user messages as-is.
+Step 2: List ALL entities found in the user messages.
 Step 3: For EACH pair of entities, determine if a relation exists.
 
 Entity types (use exactly one): person, organization, place, product, event, concept, other.
