@@ -619,32 +619,32 @@ func (s *Store) ExpandRelations(seedIDs []string, userID string, maxDepth int, l
 		}
 
 		nextFrontier := make(map[string]bool)
-		for rows.Next() {
-			var r Relation
-			var srcID, tgtID string
-			if err := rows.Scan(&r.ID, &r.Relation, &srcID, &r.Source, &r.SourceType, &tgtID, &r.Target, &r.TargetType); err != nil {
-				rows.Close()
-				return nil, err
+		err = func() error {
+			defer rows.Close()
+			for rows.Next() {
+				var r Relation
+				var srcID, tgtID string
+				if err := rows.Scan(&r.ID, &r.Relation, &srcID, &r.Source, &r.SourceType, &tgtID, &r.Target, &r.TargetType); err != nil {
+					return err
+				}
+				if seen[r.ID] {
+					continue
+				}
+				seen[r.ID] = true
+				result = append(result, r)
+				if !frontier[srcID] {
+					nextFrontier[srcID] = true
+				}
+				if !frontier[tgtID] {
+					nextFrontier[tgtID] = true
+				}
 			}
-			if seen[r.ID] {
-				continue
-			}
-			seen[r.ID] = true
-			result = append(result, r)
-			// Add newly discovered entities to next frontier
-			if !frontier[srcID] {
-				nextFrontier[srcID] = true
-			}
-			if !frontier[tgtID] {
-				nextFrontier[tgtID] = true
-			}
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
+			return rows.Err()
+		}()
+		if err != nil {
 			return nil, err
 		}
 
-		// Move to next hop
 		frontier = nextFrontier
 	}
 

@@ -16,7 +16,16 @@ linters:
     - errorlint
     - exhaustive
     - copyloopvar
+    - forbidigo
   settings:
+    forbidigo:
+      forbid:
+        - pattern: ^log\..*$
+          msg: "use m.log (slog.Logger) instead of the log package"
+        - pattern: ^fmt\.Print.*$
+          msg: "library code must not write to stdout — use m.log or return values"
+        - pattern: ^println$
+          msg: "use m.log instead of println"
     gocritic: {}
     revive:
       rules:
@@ -56,6 +65,9 @@ linters:
       # Cobra requires fixed signatures, ctx kept for API consistency
       - text: "unused-parameter"
         linters: [revive]
+      # CLI and MCP server legitimately print to stdout
+      - path: cmd/
+        linters: [forbidigo]
 
 formatters:
   enable:

@@ -38,7 +38,7 @@ func applyDecay(facts []Fact) {
 
 // truncateMessages keeps the last N messages that fit within maxChars.
 // Always keeps at least 1 message.
-func truncateMessages(log *slog.Logger, messages []Message, maxChars int) []Message {
+func truncateMessages(logger *slog.Logger, messages []Message, maxChars int) []Message {
 	total := 0
 	for _, m := range messages {
 		total += len(m.Role) + len(m.Content) + 3 // "role: content\n"
@@ -57,7 +57,7 @@ func truncateMessages(log *slog.Logger, messages []Message, maxChars int) []Mess
 		budget -= cost
 		start = i
 	}
-	log.Warn("truncating conversation", "from", len(messages), "to", len(messages)-start, "chars", total, "limit", maxChars)
+	logger.Warn("truncating conversation", "from", len(messages), "to", len(messages)-start, "chars", total, "limit", maxChars)
 	return messages[start:]
 }
 
