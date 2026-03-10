@@ -9,13 +9,14 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Memory is the main API for faktory.
 type Memory struct {
 	store    *Store
-	llm      *LLM
-	embedder *Embedder
+	llm      Completer
+	embedder TextEmbedder
 	cfg      Config
 	log      *slog.Logger
 }
@@ -29,8 +30,21 @@ func New(cfg Config) (*Memory, error) {
 		return nil, fmt.Errorf("open store: %w", err)
 	}
 
-	llm := NewLLM(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel)
-	embedder := NewEmbedder(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.EmbedModel, cfg.EmbedDimension)
+	var llm Completer
+	if cfg.Completer != nil {
+		llm = cfg.Completer
+	} else {
+		httpClient := cfg.buildHTTPClient()
+		llm = NewLLM(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel, httpClient)
+	}
+
+	var embedder TextEmbedder
+	if cfg.TextEmbedder != nil {
+		embedder = cfg.TextEmbedder
+	} else {
+		httpClient := cfg.buildHTTPClient()
+		embedder = NewEmbedder(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.EmbedModel, cfg.EmbedDimension, httpClient)
+	}
 
 	return &Memory{
 		store:    store,
@@ -60,11 +74,13 @@ func (m *Memory) Add(ctx context.Context, messages []Message, userID string) (*A
 	}
 
 	var (
-		factResult  *AddResult
-		factErr     error
-		graphTokens int
-		graphErr    error
-		wg          sync.WaitGroup
+		factResult     *AddResult
+		factErr        error
+		graphTokens    int
+		graphEntities  []EntityRef
+		graphRelations []RelationRef
+		graphErr       error
+		wg             sync.WaitGroup
 	)
 
 	wg.Add(2)
@@ -78,7 +94,7 @@ func (m *Memory) Add(ctx context.Context, messages []Message, userID string) (*A
 	// Graph pipeline (non-fatal)
 	go func() {
 		defer wg.Done()
-		graphTokens, graphErr = m.addGraph(ctx, messages, userID)
+		graphTokens, graphEntities, graphRelations, graphErr = m.addGraph(ctx, messages, userID)
 	}()
 
 	wg.Wait()
@@ -90,6 +106,13 @@ func (m *Memory) Add(ctx context.Context, messages []Message, userID string) (*A
 	if factErr != nil {
 		return nil, fmt.Errorf("fact pipeline: %w", factErr)
 	}
+
+	if graphErr != nil {
+		factResult.GraphErrors = append(factResult.GraphErrors, graphErr.Error())
+	}
+
+	factResult.ExtractedEntities = graphEntities
+	factResult.ExtractedRelations = graphRelations
 
 	// Mark conversation as processed for future dedup
 	_ = m.store.MarkConversationProcessed(userID, contentHash)
@@ -278,20 +301,21 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID string
 		}
 	}
 
+	result.ExtractedFacts = extraction.Facts
 	result.Tokens = totalTokens
 	return result, nil
 }
 
 // --- Graph Pipeline ---
 
-func (m *Memory) addGraph(ctx context.Context, messages []Message, userID string) (int, error) {
+func (m *Memory) addGraph(ctx context.Context, messages []Message, userID string) (int, []EntityRef, []RelationRef, error) {
 	messages = truncateMessages(m.log, messages, maxMessageChars)
 	userContent := formatUserMessages(messages)
 
 	var extraction EntityExtractionResult
 	tokens, err := m.llm.Complete(ctx, entityExtractionPrompt, userContent, "entity_extraction", entityExtractionSchema, &extraction)
 	if err != nil {
-		return tokens, fmt.Errorf("extract entities: %w", err)
+		return tokens, nil, nil, fmt.Errorf("extract entities: %w", err)
 	}
 
 	// Validate extraction — retry once on errors, log warnings
@@ -328,6 +352,16 @@ func (m *Memory) addGraph(ctx context.Context, messages []Message, userID string
 		}
 	}
 
+	// Collect extracted refs for observability
+	var entityRefs []EntityRef
+	var relationRefs []RelationRef
+	for _, e := range extraction.Entities {
+		entityRefs = append(entityRefs, EntityRef(e))
+	}
+	for _, r := range extraction.Relations {
+		relationRefs = append(relationRefs, RelationRef(r))
+	}
+
 	// Upsert entities
 	entityKeyToID := make(map[string]string)
 	var entNames []string
@@ -340,7 +374,7 @@ func (m *Memory) addGraph(ctx context.Context, messages []Message, userID string
 
 		id, err := m.store.UpsertEntity(userID, name, e.Type)
 		if err != nil {
-			return tokens, fmt.Errorf("upsert entity %q: %w", name, err)
+			return tokens, nil, nil, fmt.Errorf("upsert entity %q: %w", name, err)
 		}
 		entityKeyToID[entityKey(name)] = id
 		entNames = append(entNames, name)
@@ -351,11 +385,11 @@ func (m *Memory) addGraph(ctx context.Context, messages []Message, userID string
 	if len(entNames) > 0 {
 		entEmbs, err := m.embedder.EmbedBatch(ctx, entNames)
 		if err != nil {
-			return tokens, fmt.Errorf("embed entities: %w", err)
+			return tokens, nil, nil, fmt.Errorf("embed entities: %w", err)
 		}
 		for i, id := range entIDs {
 			if err := m.store.UpsertEntityEmbedding(id, entEmbs[i]); err != nil {
-				return tokens, fmt.Errorf("store entity embedding %q: %w", entNames[i], err)
+				return tokens, nil, nil, fmt.Errorf("store entity embedding %q: %w", entNames[i], err)
 			}
 		}
 	}
@@ -372,7 +406,7 @@ func (m *Memory) addGraph(ctx context.Context, messages []Message, userID string
 		if !ok {
 			id, err := m.store.UpsertEntity(userID, source, "other")
 			if err != nil {
-				return tokens, fmt.Errorf("upsert source entity %q: %w", source, err)
+				return tokens, nil, nil, fmt.Errorf("upsert source entity %q: %w", source, err)
 			}
 			sourceID = id
 			entityKeyToID[entityKey(source)] = id
@@ -382,18 +416,18 @@ func (m *Memory) addGraph(ctx context.Context, messages []Message, userID string
 		if !ok {
 			id, err := m.store.UpsertEntity(userID, target, "other")
 			if err != nil {
-				return tokens, fmt.Errorf("upsert target entity %q: %w", target, err)
+				return tokens, nil, nil, fmt.Errorf("upsert target entity %q: %w", target, err)
 			}
 			targetID = id
 			entityKeyToID[entityKey(target)] = id
 		}
 
 		if err := m.store.UpsertRelation(userID, sourceID, r.Relation, targetID); err != nil {
-			return tokens, fmt.Errorf("upsert relation: %w", err)
+			return tokens, nil, nil, fmt.Errorf("upsert relation: %w", err)
 		}
 	}
 
-	return tokens, nil
+	return tokens, entityRefs, relationRefs, nil
 }
 
 // --- Read Path ---
@@ -460,6 +494,68 @@ func (m *Memory) Update(ctx context.Context, factID string, text string) error {
 // Delete removes a single fact and its embedding.
 func (m *Memory) Delete(ctx context.Context, factID string) error {
 	return m.store.DeleteFact(factID)
+}
+
+// History returns all history entries for a fact, newest first.
+func (m *Memory) History(_ context.Context, factID string) ([]FactHistoryEntry, error) {
+	return m.store.GetFactHistory(factID)
+}
+
+// Undo reverses the latest mutation on a fact.
+//   - DELETE -> re-insert fact with old_text, re-embed, record UNDO
+//   - UPDATE -> restore old_text, re-embed, update hash, record UNDO
+//   - ADD    -> delete the fact, record UNDO
+func (m *Memory) Undo(ctx context.Context, factID string) error {
+	entry, err := m.store.GetLatestHistoryEntry(factID)
+	if err != nil {
+		return fmt.Errorf("get latest history: %w", err)
+	}
+	if entry == nil {
+		return fmt.Errorf("no history for fact %s", factID)
+	}
+
+	switch entry.Event {
+	case "DELETE":
+		emb, err := m.embedder.Embed(ctx, entry.OldText)
+		if err != nil {
+			return fmt.Errorf("embed restored text: %w", err)
+		}
+		if err := m.store.ReinsertFact(factID, entry.UserID, entry.OldText, hashFact(entry.OldText), emb); err != nil {
+			return fmt.Errorf("reinsert fact: %w", err)
+		}
+
+	case "UPDATE":
+		emb, err := m.embedder.Embed(ctx, entry.OldText)
+		if err != nil {
+			return fmt.Errorf("embed restored text: %w", err)
+		}
+		if err := m.store.UpdateFact(factID, entry.OldText, hashFact(entry.OldText), emb); err != nil {
+			return fmt.Errorf("restore fact: %w", err)
+		}
+
+	case "ADD":
+		if err := m.store.DeleteFact(factID); err != nil {
+			return fmt.Errorf("undo add: %w", err)
+		}
+
+	default:
+		return fmt.Errorf("cannot undo event type %q", entry.Event)
+	}
+
+	// Record UNDO history entry
+	if _, err := m.store.db.Exec(
+		"INSERT INTO fact_history (id, fact_id, user_id, event, old_text, new_text, created_at) VALUES (?, ?, ?, 'UNDO', ?, ?, ?)",
+		newID(), factID, entry.UserID, entry.NewText, entry.OldText, now()); err != nil {
+		return fmt.Errorf("record undo history: %w", err)
+	}
+
+	return nil
+}
+
+// PruneHistory deletes history entries older than the given duration for a user.
+func (m *Memory) PruneHistory(_ context.Context, userID string, olderThan time.Duration) (int, error) {
+	cutoff := time.Now().Add(-olderThan)
+	return m.store.PruneHistoryForUser(userID, cutoff)
 }
 
 // DeleteAll removes all data (facts, embeddings, entities, relations) for a user.

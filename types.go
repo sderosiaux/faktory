@@ -1,8 +1,12 @@
 package faktory
 
 import (
+	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
+	"net/http"
+	"time"
 )
 
 // nopLogger returns a logger that discards all output.
@@ -38,13 +42,53 @@ type Relation struct {
 	TargetType string `json:"target_type"`
 }
 
+// EntityRef is a name+type pair extracted from a conversation.
+type EntityRef struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
+// RelationRef is a source-relation-target triplet extracted from a conversation.
+type RelationRef struct {
+	Source   string `json:"source"`
+	Relation string `json:"relation"`
+	Target   string `json:"target"`
+}
+
 // AddResult summarizes what happened during an Add() call.
 type AddResult struct {
-	Added   []Fact   `json:"added,omitempty"`
-	Updated []Fact   `json:"updated,omitempty"`
-	Deleted []string `json:"deleted,omitempty"`
-	Noops   int      `json:"noops,omitempty"`
-	Tokens  int      `json:"tokens,omitempty"`
+	Added              []Fact        `json:"added,omitempty"`
+	Updated            []Fact        `json:"updated,omitempty"`
+	Deleted            []string      `json:"deleted,omitempty"`
+	Noops              int           `json:"noops,omitempty"`
+	Tokens             int           `json:"tokens,omitempty"`
+	GraphErrors        []string      `json:"graph_errors,omitempty"`
+	ExtractedFacts     []string      `json:"extracted_facts,omitempty"`
+	ExtractedEntities  []EntityRef   `json:"extracted_entities,omitempty"`
+	ExtractedRelations []RelationRef `json:"extracted_relations,omitempty"`
+}
+
+// Completer abstracts LLM chat-completion with structured output.
+type Completer interface {
+	Complete(ctx context.Context, system, user, schemaName string, schema json.RawMessage, result any) (int, error)
+	CompleteWithCorrection(ctx context.Context, system, user, previousResponse, correction, schemaName string, schema json.RawMessage, result any) (int, error)
+}
+
+// TextEmbedder abstracts text embedding.
+type TextEmbedder interface {
+	Embed(ctx context.Context, text string) ([]float32, error)
+	EmbedBatch(ctx context.Context, texts []string) ([][]float32, error)
+}
+
+// FactHistoryEntry records a single mutation event on a fact.
+type FactHistoryEntry struct {
+	ID        string `json:"id"`
+	FactID    string `json:"fact_id"`
+	UserID    string `json:"user_id"`
+	Event     string `json:"event"` // ADD, UPDATE, DELETE, UNDO
+	OldText   string `json:"old_text,omitempty"`
+	NewText   string `json:"new_text,omitempty"`
+	CreatedAt string `json:"created_at"`
 }
 
 // RecallOptions configures the Recall() method.
@@ -82,13 +126,33 @@ type ExportRecord struct {
 
 // Config holds all configuration for a Memory instance.
 type Config struct {
-	DBPath         string      // Path to SQLite database file
-	LLMBaseURL     string      // OpenAI-compatible API base URL (e.g., "https://api.openai.com/v1")
-	LLMAPIKey      string      // API key for LLM
-	LLMModel       string      // Model name for chat completions (e.g., "gpt-4o-mini")
-	EmbedModel     string      // Model name for embeddings (e.g., "text-embedding-3-small")
-	EmbedDimension int         // Embedding vector dimension (e.g., 1536)
-	Logger         *slog.Logger // Structured logger (default: silent)
+	DBPath         string        // Path to SQLite database file
+	LLMBaseURL     string        // OpenAI-compatible API base URL (e.g., "https://api.openai.com/v1")
+	LLMAPIKey      string        // API key for LLM
+	LLMModel       string        // Model name for chat completions (e.g., "gpt-4o-mini")
+	EmbedModel     string        // Model name for embeddings (e.g., "text-embedding-3-small")
+	EmbedDimension int           // Embedding vector dimension (e.g., 1536)
+	Logger         *slog.Logger  // Structured logger (default: silent)
+	HTTPTimeout    time.Duration // Override default 30s timeout (0 = use default)
+	HTTPClient     *http.Client  // Fully custom HTTP client (skips timeout and retry when set)
+	Completer      Completer     // Custom LLM completer (overrides LLM* fields when set)
+	TextEmbedder   TextEmbedder  // Custom text embedder (overrides Embed* fields when set)
+}
+
+const defaultHTTPTimeout = 30 * time.Second
+
+// buildHTTPClient returns the HTTP client to use. If HTTPClient is set, it is
+// returned as-is. Otherwise a new client is created with the configured (or
+// default 30s) timeout.
+func (c Config) buildHTTPClient() *http.Client {
+	if c.HTTPClient != nil {
+		return c.HTTPClient
+	}
+	t := c.HTTPTimeout
+	if t == 0 {
+		t = defaultHTTPTimeout
+	}
+	return &http.Client{Timeout: t}
 }
 
 func (c Config) withDefaults() Config {

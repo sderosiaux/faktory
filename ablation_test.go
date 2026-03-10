@@ -146,7 +146,7 @@ func TestAblation(t *testing.T) {
 func runAblationTrial(t *testing.T, cfg ablationCfg) (ablationResult, error) {
 	t.Helper()
 
-	llm := NewLLM("https://api.openai.com/v1", os.Getenv("OPENAI_API_KEY"), cfg.model)
+	llm := NewLLM("https://api.openai.com/v1", os.Getenv("OPENAI_API_KEY"), cfg.model, nil)
 	llm.temperature = cfg.temperature
 	ctx := context.Background()
 	totalTokens := 0

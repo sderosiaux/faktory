@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"time"
 )
 
 type LLM struct {
@@ -17,14 +19,24 @@ type LLM struct {
 	// useJSONObject is set to true if json_schema mode fails (fallback for Ollama/Groq)
 	useJSONObject bool
 	temperature   float64
+	// customClient is true when the caller provided their own http.Client;
+	// retry logic is skipped in that case.
+	customClient bool
 }
 
-func NewLLM(baseURL, apiKey, model string) *LLM {
+// NewLLM creates an LLM client. If httpClient is nil, a default client with
+// 30s timeout is used and transient-error retry is enabled.
+func NewLLM(baseURL, apiKey, model string, httpClient *http.Client) *LLM {
+	custom := httpClient != nil
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: defaultHTTPTimeout}
+	}
 	return &LLM{
-		baseURL:    baseURL,
-		apiKey:     apiKey,
-		model:      model,
-		httpClient: &http.Client{},
+		baseURL:      baseURL,
+		apiKey:       apiKey,
+		model:        model,
+		httpClient:   httpClient,
+		customClient: custom,
 	}
 }
 
@@ -85,16 +97,23 @@ func (l *LLM) Complete(ctx context.Context, system, user string, schemaName stri
 	}
 
 	totalTokens := 0
+	httpRetried := false
 
-	raw, tokens, err := l.doRequest(ctx, messages, rf)
+	raw, tokens, retried, err := l.doRequest(ctx, messages, rf)
 	totalTokens += tokens
+	if retried {
+		httpRetried = true
+	}
 	if err != nil {
 		// If json_schema mode fails with 400, fall back to json_object
 		if !l.useJSONObject {
 			l.useJSONObject = true
 			rf = &responseFormat{Type: "json_object"}
-			raw, tokens, err = l.doRequest(ctx, messages, rf)
+			raw, tokens, retried, err = l.doRequest(ctx, messages, rf)
 			totalTokens += tokens
+			if retried {
+				httpRetried = true
+			}
 			if err != nil {
 				return totalTokens, err
 			}
@@ -104,8 +123,11 @@ func (l *LLM) Complete(ctx context.Context, system, user string, schemaName stri
 	}
 
 	if err := json.Unmarshal([]byte(raw), result); err != nil {
-		// Retry once on parse failure
-		raw, tokens, retryErr := l.doRequest(ctx, messages, rf)
+		// Skip parse-failure retry if HTTP already retried (max 2 HTTP requests per Complete call)
+		if httpRetried {
+			return totalTokens, fmt.Errorf("parse LLM response: %w\nraw: %s", err, raw)
+		}
+		raw, tokens, _, retryErr := l.doRequest(ctx, messages, rf)
 		totalTokens += tokens
 		if retryErr != nil {
 			return totalTokens, fmt.Errorf("retry after parse error %w: %w", err, retryErr)
@@ -142,7 +164,7 @@ func (l *LLM) CompleteWithCorrection(ctx context.Context, system, user, previous
 		}
 	}
 
-	raw, tokens, err := l.doRequest(ctx, messages, rf)
+	raw, tokens, _, err := l.doRequest(ctx, messages, rf)
 	if err != nil {
 		return tokens, err
 	}
@@ -154,7 +176,12 @@ func (l *LLM) CompleteWithCorrection(ctx context.Context, system, user, previous
 	return tokens, nil
 }
 
-func (l *LLM) doRequest(ctx context.Context, messages []chatMessage, rf *responseFormat) (string, int, error) {
+const maxRetryAfter = 10 * time.Second
+
+// doRequest sends a single chat completion HTTP request. It returns
+// (content, tokens, httpRetried, error). When the caller provided a custom
+// HTTP client, retry is skipped entirely.
+func (l *LLM) doRequest(ctx context.Context, messages []chatMessage, rf *responseFormat) (string, int, bool, error) {
 	req := chatRequest{
 		Model:          l.model,
 		Messages:       messages,
@@ -164,12 +191,46 @@ func (l *LLM) doRequest(ctx context.Context, messages []chatMessage, rf *respons
 
 	body, err := json.Marshal(req)
 	if err != nil {
-		return "", 0, err
+		return "", 0, false, err
 	}
 
+	content, tokens, statusCode, retryAfterHeader, err := l.sendHTTP(ctx, body)
+	if err == nil {
+		return content, tokens, false, nil
+	}
+
+	// No retry for custom clients or non-retryable status codes.
+	if l.customClient || !isRetryable(statusCode) {
+		return "", tokens, false, err
+	}
+
+	delay, ok := retryDelay(statusCode, retryAfterHeader)
+	if !ok {
+		// Retry-After exceeds cap — fail immediately.
+		return "", tokens, false, err
+	}
+
+	select {
+	case <-ctx.Done():
+		return "", tokens, false, ctx.Err()
+	case <-time.After(delay):
+	}
+
+	content, retryTokens, _, _, retryErr := l.sendHTTP(ctx, body)
+	tokens += retryTokens
+	if retryErr != nil {
+		return "", tokens, true, retryErr
+	}
+	return content, tokens, true, nil
+}
+
+// sendHTTP performs the raw HTTP POST and returns parsed content on 200.
+// On non-200 it returns the status code and Retry-After header for the caller
+// to decide on retry.
+func (l *LLM) sendHTTP(ctx context.Context, body []byte) (string, int, int, string, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", l.baseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return "", 0, err
+		return "", 0, 0, "", err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	if l.apiKey != "" {
@@ -178,27 +239,55 @@ func (l *LLM) doRequest(ctx context.Context, messages []chatMessage, rf *respons
 
 	resp, err := l.httpClient.Do(httpReq)
 	if err != nil {
-		return "", 0, fmt.Errorf("LLM request: %w", err)
+		return "", 0, 0, "", fmt.Errorf("LLM request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", 0, fmt.Errorf("read LLM response: %w", err)
+		return "", 0, resp.StatusCode, "", fmt.Errorf("read LLM response: %w", err)
 	}
 
 	if resp.StatusCode != 200 {
-		return "", 0, fmt.Errorf("LLM returned %d: %s", resp.StatusCode, string(respBody))
+		ra := resp.Header.Get("Retry-After")
+		return "", 0, resp.StatusCode, ra, fmt.Errorf("LLM returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	var chatResp chatResponse
 	if err := json.Unmarshal(respBody, &chatResp); err != nil {
-		return "", 0, fmt.Errorf("decode LLM response: %w", err)
+		return "", 0, 200, "", fmt.Errorf("decode LLM response: %w", err)
 	}
 
 	if len(chatResp.Choices) == 0 {
-		return "", 0, fmt.Errorf("LLM returned no choices")
+		return "", 0, 200, "", fmt.Errorf("LLM returned no choices")
 	}
 
-	return chatResp.Choices[0].Message.Content, chatResp.Usage.TotalTokens, nil
+	return chatResp.Choices[0].Message.Content, chatResp.Usage.TotalTokens, 200, "", nil
+}
+
+// isRetryable returns true for HTTP status codes that warrant a single retry.
+func isRetryable(statusCode int) bool {
+	switch statusCode {
+	case 429, 500, 502, 503:
+		return true
+	}
+	return false
+}
+
+// retryDelay returns the delay before retrying and whether a retry is allowed.
+// For 429, uses Retry-After header (capped at maxRetryAfter). For 5xx, 1s.
+func retryDelay(statusCode int, retryAfterHeader string) (time.Duration, bool) {
+	if statusCode == 429 {
+		secs, err := strconv.Atoi(retryAfterHeader)
+		if err != nil || secs <= 0 {
+			secs = 1
+		}
+		d := time.Duration(secs) * time.Second
+		if d > maxRetryAfter {
+			return 0, false
+		}
+		return d, true
+	}
+	// 500/502/503
+	return 1 * time.Second, true
 }

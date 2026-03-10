@@ -56,6 +56,20 @@ CREATE INDEX IF NOT EXISTS idx_relations_user ON relations(user_id);
 CREATE INDEX IF NOT EXISTS idx_relations_source ON relations(source_id);
 CREATE INDEX IF NOT EXISTS idx_relations_target ON relations(target_id);
 
+CREATE TABLE IF NOT EXISTS fact_history (
+    id         TEXT PRIMARY KEY,
+    fact_id    TEXT NOT NULL,
+    user_id    TEXT NOT NULL,
+    event      TEXT NOT NULL,
+    old_text   TEXT,
+    new_text   TEXT,
+    old_hash   TEXT,
+    new_hash   TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_fact_history_fact ON fact_history(fact_id);
+CREATE INDEX IF NOT EXISTS idx_fact_history_user ON fact_history(user_id, created_at);
+
 CREATE TABLE IF NOT EXISTS processed_conversations (
     user_id      TEXT NOT NULL,
     content_hash TEXT NOT NULL,
@@ -103,6 +117,24 @@ func OpenStore(dbPath string, dimension int) (*Store, error) {
 		if _, err := db.Exec(vecSQL); err != nil {
 			db.Close()
 			return nil, fmt.Errorf("create %s: %w", tbl, err)
+		}
+	}
+
+	// Migrate: create fact_history table if missing (for DBs created before this schema addition)
+	var historyExists int
+	_ = db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='fact_history'").Scan(&historyExists)
+	if historyExists == 0 {
+		historyDDL := `
+			CREATE TABLE IF NOT EXISTS fact_history (
+			    id TEXT PRIMARY KEY, fact_id TEXT NOT NULL, user_id TEXT NOT NULL,
+			    event TEXT NOT NULL, old_text TEXT, new_text TEXT, old_hash TEXT, new_hash TEXT,
+			    created_at TEXT NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_fact_history_fact ON fact_history(fact_id);
+			CREATE INDEX IF NOT EXISTS idx_fact_history_user ON fact_history(user_id, created_at);`
+		if _, err := db.Exec(historyDDL); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("migrate fact_history: %w", err)
 		}
 	}
 
@@ -160,6 +192,12 @@ func (s *Store) InsertFact(userID, text, hash string, embedding []float32) (stri
 		return "", fmt.Errorf("insert embedding: %w", err)
 	}
 
+	if _, err := tx.Exec(
+		"INSERT INTO fact_history (id, fact_id, user_id, event, new_text, new_hash, created_at) VALUES (?, ?, ?, 'ADD', ?, ?, ?)",
+		newID(), id, userID, text, hash, ts); err != nil {
+		return "", fmt.Errorf("record history: %w", err)
+	}
+
 	return id, tx.Commit()
 }
 
@@ -170,7 +208,14 @@ func (s *Store) UpdateFact(id, text, hash string, embedding []float32) error {
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec("UPDATE facts SET text = ?, hash = ?, updated_at = ? WHERE id = ?", text, hash, now(), id); err != nil {
+	// Capture current state for history
+	var oldText, oldHash, userID string
+	if err := tx.QueryRow("SELECT user_id, text, hash FROM facts WHERE id = ?", id).Scan(&userID, &oldText, &oldHash); err != nil {
+		return fmt.Errorf("read current fact: %w", err)
+	}
+
+	ts := now()
+	if _, err := tx.Exec("UPDATE facts SET text = ?, hash = ?, updated_at = ? WHERE id = ?", text, hash, ts, id); err != nil {
 		return fmt.Errorf("update fact: %w", err)
 	}
 
@@ -186,6 +231,12 @@ func (s *Store) UpdateFact(id, text, hash string, embedding []float32) error {
 		return fmt.Errorf("insert new embedding: %w", err)
 	}
 
+	if _, err := tx.Exec(
+		"INSERT INTO fact_history (id, fact_id, user_id, event, old_text, new_text, old_hash, new_hash, created_at) VALUES (?, ?, ?, 'UPDATE', ?, ?, ?, ?, ?)",
+		newID(), id, userID, oldText, text, oldHash, hash, ts); err != nil {
+		return fmt.Errorf("record history: %w", err)
+	}
+
 	return tx.Commit()
 }
 
@@ -196,11 +247,24 @@ func (s *Store) DeleteFact(id string) error {
 	}
 	defer tx.Rollback()
 
+	// Capture current state for history
+	var oldText, oldHash, userID string
+	if err := tx.QueryRow("SELECT user_id, text, hash FROM facts WHERE id = ?", id).Scan(&userID, &oldText, &oldHash); err != nil {
+		return fmt.Errorf("read current fact: %w", err)
+	}
+
 	if _, err := tx.Exec("DELETE FROM fact_embeddings WHERE id = ?", id); err != nil {
 		return fmt.Errorf("delete embedding: %w", err)
 	}
 	if _, err := tx.Exec("DELETE FROM facts WHERE id = ?", id); err != nil {
 		return fmt.Errorf("delete fact: %w", err)
+	}
+
+	ts := now()
+	if _, err := tx.Exec(
+		"INSERT INTO fact_history (id, fact_id, user_id, event, old_text, old_hash, created_at) VALUES (?, ?, ?, 'DELETE', ?, ?, ?)",
+		newID(), id, userID, oldText, oldHash, ts); err != nil {
+		return fmt.Errorf("record history: %w", err)
 	}
 
 	return tx.Commit()
@@ -217,6 +281,79 @@ func (s *Store) GetFact(id string) (*Fact, error) {
 		return nil, err
 	}
 	return &f, nil
+}
+
+// ReinsertFact re-inserts a fact with a specific ID (used by Undo after DELETE).
+func (s *Store) ReinsertFact(id, userID, text, hash string, embedding []float32) error {
+	ts := now()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("INSERT INTO facts (id, user_id, text, hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+		id, userID, text, hash, ts, ts); err != nil {
+		return fmt.Errorf("reinsert fact: %w", err)
+	}
+
+	embJSON, err := json.Marshal(embedding)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec("INSERT INTO fact_embeddings (id, embedding) VALUES (?, ?)", id, string(embJSON)); err != nil {
+		return fmt.Errorf("reinsert embedding: %w", err)
+	}
+
+	return tx.Commit()
+}
+
+// GetFactHistory returns all history entries for a fact, newest first.
+func (s *Store) GetFactHistory(factID string) ([]FactHistoryEntry, error) {
+	rows, err := s.db.Query(
+		"SELECT id, fact_id, user_id, event, COALESCE(old_text,''), COALESCE(new_text,''), created_at FROM fact_history WHERE fact_id = ? ORDER BY created_at DESC, rowid DESC",
+		factID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []FactHistoryEntry
+	for rows.Next() {
+		var e FactHistoryEntry
+		if err := rows.Scan(&e.ID, &e.FactID, &e.UserID, &e.Event, &e.OldText, &e.NewText, &e.CreatedAt); err != nil {
+			return nil, err
+		}
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
+// GetLatestHistoryEntry returns the most recent history entry for a fact.
+func (s *Store) GetLatestHistoryEntry(factID string) (*FactHistoryEntry, error) {
+	var e FactHistoryEntry
+	err := s.db.QueryRow(
+		"SELECT id, fact_id, user_id, event, COALESCE(old_text,''), COALESCE(new_text,''), created_at FROM fact_history WHERE fact_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+		factID).Scan(&e.ID, &e.FactID, &e.UserID, &e.Event, &e.OldText, &e.NewText, &e.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &e, nil
+}
+
+// PruneHistoryForUser deletes history entries older than cutoff for a user, returns count deleted.
+func (s *Store) PruneHistoryForUser(userID string, cutoff time.Time) (int, error) {
+	res, err := s.db.Exec(
+		"DELETE FROM fact_history WHERE user_id = ? AND created_at < ?",
+		userID, cutoff.UTC().Format(time.RFC3339))
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
 }
 
 // BumpAccess increments access_count and sets last_accessed_at for the given fact IDs.
@@ -363,6 +500,9 @@ func (s *Store) DeleteAllForUser(userID string) error {
 		return err
 	}
 	if _, err := tx.Exec("DELETE FROM profiles WHERE user_id = ?", userID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec("DELETE FROM fact_history WHERE user_id = ?", userID); err != nil {
 		return err
 	}
 
