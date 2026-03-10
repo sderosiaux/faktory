@@ -20,6 +20,7 @@ const schema = `
 CREATE TABLE IF NOT EXISTS facts (
     id              TEXT PRIMARY KEY,
     user_id         TEXT NOT NULL,
+    namespace       TEXT NOT NULL DEFAULT '',
     text            TEXT NOT NULL,
     hash            TEXT NOT NULL,
     created_at      TEXT NOT NULL,
@@ -31,28 +32,33 @@ CREATE TABLE IF NOT EXISTS facts (
 CREATE TABLE IF NOT EXISTS entities (
     id         TEXT PRIMARY KEY,
     user_id    TEXT NOT NULL,
+    namespace  TEXT NOT NULL DEFAULT '',
     name       TEXT NOT NULL,
     type       TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    UNIQUE(user_id, name, type)
+    UNIQUE(user_id, namespace, name, type)
 );
 
 CREATE TABLE IF NOT EXISTS relations (
     id         TEXT PRIMARY KEY,
     user_id    TEXT NOT NULL,
+    namespace  TEXT NOT NULL DEFAULT '',
     source_id  TEXT NOT NULL REFERENCES entities(id),
     relation   TEXT NOT NULL,
     target_id  TEXT NOT NULL REFERENCES entities(id),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    UNIQUE(user_id, source_id, relation, target_id)
+    UNIQUE(user_id, namespace, source_id, relation, target_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_facts_user ON facts(user_id);
 CREATE INDEX IF NOT EXISTS idx_facts_hash ON facts(user_id, hash);
+CREATE INDEX IF NOT EXISTS idx_facts_user_ns ON facts(user_id, namespace);
 CREATE INDEX IF NOT EXISTS idx_entities_user ON entities(user_id);
+CREATE INDEX IF NOT EXISTS idx_entities_user_ns ON entities(user_id, namespace);
 CREATE INDEX IF NOT EXISTS idx_relations_user ON relations(user_id);
+CREATE INDEX IF NOT EXISTS idx_relations_user_ns ON relations(user_id, namespace);
 CREATE INDEX IF NOT EXISTS idx_relations_source ON relations(source_id);
 CREATE INDEX IF NOT EXISTS idx_relations_target ON relations(target_id);
 
@@ -60,6 +66,7 @@ CREATE TABLE IF NOT EXISTS fact_history (
     id         TEXT PRIMARY KEY,
     fact_id    TEXT NOT NULL,
     user_id    TEXT NOT NULL,
+    namespace  TEXT NOT NULL DEFAULT '',
     event      TEXT NOT NULL,
     old_text   TEXT,
     new_text   TEXT,
@@ -72,16 +79,19 @@ CREATE INDEX IF NOT EXISTS idx_fact_history_user ON fact_history(user_id, create
 
 CREATE TABLE IF NOT EXISTS processed_conversations (
     user_id      TEXT NOT NULL,
+    namespace    TEXT NOT NULL DEFAULT '',
     content_hash TEXT NOT NULL,
     created_at   TEXT NOT NULL,
-    PRIMARY KEY(user_id, content_hash)
+    PRIMARY KEY(user_id, namespace, content_hash)
 );
 
 CREATE TABLE IF NOT EXISTS profiles (
-    user_id    TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL,
+    namespace  TEXT NOT NULL DEFAULT '',
     summary    TEXT NOT NULL,
     fact_hash  TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(user_id, namespace)
 );
 `
 
@@ -153,6 +163,37 @@ func OpenStore(dbPath string, dimension int) (*Store, error) {
 		}
 	}
 
+	// Migrate: add namespace column to all tables if missing
+	nsMigrations := []struct{ table, ddl string }{
+		{"facts", "ALTER TABLE facts ADD COLUMN namespace TEXT NOT NULL DEFAULT ''"},
+		{"entities", "ALTER TABLE entities ADD COLUMN namespace TEXT NOT NULL DEFAULT ''"},
+		{"relations", "ALTER TABLE relations ADD COLUMN namespace TEXT NOT NULL DEFAULT ''"},
+		{"fact_history", "ALTER TABLE fact_history ADD COLUMN namespace TEXT NOT NULL DEFAULT ''"},
+		{"processed_conversations", "ALTER TABLE processed_conversations ADD COLUMN namespace TEXT NOT NULL DEFAULT ''"},
+		{"profiles", "ALTER TABLE profiles ADD COLUMN namespace TEXT NOT NULL DEFAULT ''"},
+	}
+	for _, m := range nsMigrations {
+		var exists int
+		_ = db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM pragma_table_info('%s') WHERE name = 'namespace'", m.table)).Scan(&exists)
+		if exists == 0 {
+			if _, err := db.Exec(m.ddl); err != nil {
+				db.Close()
+				return nil, fmt.Errorf("migrate namespace on %s: %w", m.table, err)
+			}
+		}
+	}
+	// Create namespace-scoped indexes (idempotent)
+	for _, idx := range []string{
+		"CREATE INDEX IF NOT EXISTS idx_facts_user_ns ON facts(user_id, namespace)",
+		"CREATE INDEX IF NOT EXISTS idx_entities_user_ns ON entities(user_id, namespace)",
+		"CREATE INDEX IF NOT EXISTS idx_relations_user_ns ON relations(user_id, namespace)",
+	} {
+		if _, err := db.Exec(idx); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("create ns index: %w", err)
+		}
+	}
+
 	return &Store{db: db, dimension: dimension}, nil
 }
 
@@ -170,7 +211,7 @@ func newID() string {
 
 // --- Facts ---
 
-func (s *Store) InsertFact(userID, text, hash string, embedding []float32) (string, error) {
+func (s *Store) InsertFact(userID, namespace, text, hash string, embedding []float32) (string, error) {
 	id := newID()
 	ts := now()
 	tx, err := s.db.Begin()
@@ -179,8 +220,8 @@ func (s *Store) InsertFact(userID, text, hash string, embedding []float32) (stri
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec("INSERT INTO facts (id, user_id, text, hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-		id, userID, text, hash, ts, ts); err != nil {
+	if _, err := tx.Exec("INSERT INTO facts (id, user_id, namespace, text, hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		id, userID, namespace, text, hash, ts, ts); err != nil {
 		return "", fmt.Errorf("insert fact: %w", err)
 	}
 
@@ -193,8 +234,8 @@ func (s *Store) InsertFact(userID, text, hash string, embedding []float32) (stri
 	}
 
 	if _, err := tx.Exec(
-		"INSERT INTO fact_history (id, fact_id, user_id, event, new_text, new_hash, created_at) VALUES (?, ?, ?, 'ADD', ?, ?, ?)",
-		newID(), id, userID, text, hash, ts); err != nil {
+		"INSERT INTO fact_history (id, fact_id, user_id, namespace, event, new_text, new_hash, created_at) VALUES (?, ?, ?, ?, 'ADD', ?, ?, ?)",
+		newID(), id, userID, namespace, text, hash, ts); err != nil {
 		return "", fmt.Errorf("record history: %w", err)
 	}
 
@@ -345,10 +386,10 @@ func (s *Store) GetLatestHistoryEntry(factID string) (*FactHistoryEntry, error) 
 }
 
 // PruneHistoryForUser deletes history entries older than cutoff for a user, returns count deleted.
-func (s *Store) PruneHistoryForUser(userID string, cutoff time.Time) (int, error) {
+func (s *Store) PruneHistoryForUser(userID, namespace string, cutoff time.Time) (int, error) {
 	res, err := s.db.Exec(
-		"DELETE FROM fact_history WHERE user_id = ? AND created_at < ?",
-		userID, cutoff.UTC().Format(time.RFC3339))
+		"DELETE FROM fact_history WHERE user_id = ? AND namespace = ? AND created_at < ?",
+		userID, namespace, cutoff.UTC().Format(time.RFC3339))
 	if err != nil {
 		return 0, err
 	}
@@ -375,8 +416,8 @@ func (s *Store) BumpAccess(ids []string) error {
 	return tx.Commit()
 }
 
-func (s *Store) GetAllFacts(userID string, limit int) ([]Fact, error) {
-	rows, err := s.db.Query("SELECT id, user_id, text, hash, created_at, updated_at, access_count FROM facts WHERE user_id = ? ORDER BY created_at DESC LIMIT ?", userID, limit)
+func (s *Store) GetAllFacts(userID, namespace string, limit int) ([]Fact, error) {
+	rows, err := s.db.Query("SELECT id, user_id, text, hash, created_at, updated_at, access_count FROM facts WHERE user_id = ? AND namespace = ? ORDER BY created_at DESC LIMIT ?", userID, namespace, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -393,7 +434,7 @@ func (s *Store) GetAllFacts(userID string, limit int) ([]Fact, error) {
 	return facts, rows.Err()
 }
 
-func (s *Store) SearchFacts(queryEmbedding []float32, userID string, limit int) ([]Fact, error) {
+func (s *Store) SearchFacts(queryEmbedding []float32, userID, namespace string, limit int) ([]Fact, error) {
 	embJSON, err := json.Marshal(queryEmbedding)
 	if err != nil {
 		return nil, err
@@ -413,9 +454,10 @@ func (s *Store) SearchFacts(queryEmbedding []float32, userID string, limit int) 
 		WHERE e.embedding MATCH ?
 		  AND k = ?
 		  AND f.user_id = ?
+		  AND f.namespace = ?
 		ORDER BY e.distance
 		LIMIT ?
-	`, string(embJSON), kFetch, userID, limit)
+	`, string(embJSON), kFetch, userID, namespace, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -434,9 +476,9 @@ func (s *Store) SearchFacts(queryEmbedding []float32, userID string, limit int) 
 	return facts, rows.Err()
 }
 
-func (s *Store) FactExistsByHash(userID, hash string) (bool, error) {
+func (s *Store) FactExistsByHash(userID, namespace, hash string) (bool, error) {
 	var count int
-	err := s.db.QueryRow("SELECT COUNT(*) FROM facts WHERE user_id = ? AND hash = ?", userID, hash).Scan(&count)
+	err := s.db.QueryRow("SELECT COUNT(*) FROM facts WHERE user_id = ? AND namespace = ? AND hash = ?", userID, namespace, hash).Scan(&count)
 	return count > 0, err
 }
 
@@ -457,7 +499,7 @@ func queryIDs(tx *sql.Tx, query string, args ...any) ([]string, error) {
 	return ids, rows.Err()
 }
 
-func (s *Store) DeleteAllForUser(userID string) error {
+func (s *Store) DeleteAllForUser(userID, namespace string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -465,7 +507,7 @@ func (s *Store) DeleteAllForUser(userID string) error {
 	defer tx.Rollback()
 
 	// Delete fact embeddings
-	factIDs, err := queryIDs(tx, "SELECT id FROM facts WHERE user_id = ?", userID)
+	factIDs, err := queryIDs(tx, "SELECT id FROM facts WHERE user_id = ? AND namespace = ?", userID, namespace)
 	if err != nil {
 		return err
 	}
@@ -475,15 +517,15 @@ func (s *Store) DeleteAllForUser(userID string) error {
 		}
 	}
 
-	if _, err := tx.Exec("DELETE FROM facts WHERE user_id = ?", userID); err != nil {
+	if _, err := tx.Exec("DELETE FROM facts WHERE user_id = ? AND namespace = ?", userID, namespace); err != nil {
 		return err
 	}
-	if _, err := tx.Exec("DELETE FROM relations WHERE user_id = ?", userID); err != nil {
+	if _, err := tx.Exec("DELETE FROM relations WHERE user_id = ? AND namespace = ?", userID, namespace); err != nil {
 		return err
 	}
 
 	// Delete entity embeddings
-	entIDs, err := queryIDs(tx, "SELECT id FROM entities WHERE user_id = ?", userID)
+	entIDs, err := queryIDs(tx, "SELECT id FROM entities WHERE user_id = ? AND namespace = ?", userID, namespace)
 	if err != nil {
 		return err
 	}
@@ -493,16 +535,16 @@ func (s *Store) DeleteAllForUser(userID string) error {
 		}
 	}
 
-	if _, err := tx.Exec("DELETE FROM entities WHERE user_id = ?", userID); err != nil {
+	if _, err := tx.Exec("DELETE FROM entities WHERE user_id = ? AND namespace = ?", userID, namespace); err != nil {
 		return err
 	}
-	if _, err := tx.Exec("DELETE FROM processed_conversations WHERE user_id = ?", userID); err != nil {
+	if _, err := tx.Exec("DELETE FROM processed_conversations WHERE user_id = ? AND namespace = ?", userID, namespace); err != nil {
 		return err
 	}
-	if _, err := tx.Exec("DELETE FROM profiles WHERE user_id = ?", userID); err != nil {
+	if _, err := tx.Exec("DELETE FROM profiles WHERE user_id = ? AND namespace = ?", userID, namespace); err != nil {
 		return err
 	}
-	if _, err := tx.Exec("DELETE FROM fact_history WHERE user_id = ?", userID); err != nil {
+	if _, err := tx.Exec("DELETE FROM fact_history WHERE user_id = ? AND namespace = ?", userID, namespace); err != nil {
 		return err
 	}
 
@@ -511,13 +553,13 @@ func (s *Store) DeleteAllForUser(userID string) error {
 
 // CleanupStaleRelations removes relations where the source or target entity name
 // appears in deletedTexts but not in any remaining fact for the user.
-func (s *Store) CleanupStaleRelations(userID string, deletedTexts []string) (int, error) {
+func (s *Store) CleanupStaleRelations(userID, namespace string, deletedTexts []string) (int, error) {
 	if len(deletedTexts) == 0 {
 		return 0, nil
 	}
 
-	// Get all entity names for this user
-	entities, err := s.GetAllEntities(userID, 100_000)
+	// Get all entity names for this user+namespace
+	entities, err := s.GetAllEntities(userID, namespace, 100_000)
 	if err != nil {
 		return 0, err
 	}
@@ -539,7 +581,7 @@ func (s *Store) CleanupStaleRelations(userID string, deletedTexts []string) (int
 	}
 
 	// For each affected entity, check if it still appears in any remaining fact
-	remainingFacts, err := s.GetAllFacts(userID, 100_000)
+	remainingFacts, err := s.GetAllFacts(userID, namespace, 100_000)
 	if err != nil {
 		return 0, err
 	}
@@ -575,7 +617,7 @@ func (s *Store) CleanupStaleRelations(userID string, deletedTexts []string) (int
 
 	deleted := 0
 	for _, id := range orphanedIDs {
-		res, err := tx.Exec("DELETE FROM relations WHERE user_id = ? AND (source_id = ? OR target_id = ?)", userID, id, id)
+		res, err := tx.Exec("DELETE FROM relations WHERE user_id = ? AND namespace = ? AND (source_id = ? OR target_id = ?)", userID, namespace, id, id)
 		if err != nil {
 			return 0, err
 		}
@@ -589,39 +631,39 @@ func (s *Store) CleanupStaleRelations(userID string, deletedTexts []string) (int
 // --- Profiles ---
 
 // GetProfile returns the cached profile for a user, or nil if none exists.
-func (s *Store) GetProfile(userID string) (summary, factHash string, err error) {
-	err = s.db.QueryRow("SELECT summary, fact_hash FROM profiles WHERE user_id = ?", userID).Scan(&summary, &factHash)
+func (s *Store) GetProfile(userID, namespace string) (summary, factHash string, err error) {
+	err = s.db.QueryRow("SELECT summary, fact_hash FROM profiles WHERE user_id = ? AND namespace = ?", userID, namespace).Scan(&summary, &factHash)
 	if err == sql.ErrNoRows {
 		return "", "", nil
 	}
 	return
 }
 
-// UpsertProfile stores or updates the cached profile for a user.
-func (s *Store) UpsertProfile(userID, summary, factHash string) error {
-	_, err := s.db.Exec(`INSERT INTO profiles (user_id, summary, fact_hash, updated_at) VALUES (?, ?, ?, ?)
-		ON CONFLICT(user_id) DO UPDATE SET summary = ?, fact_hash = ?, updated_at = ?`,
-		userID, summary, factHash, now(), summary, factHash, now())
+// UpsertProfile stores or updates the cached profile for a user+namespace.
+func (s *Store) UpsertProfile(userID, namespace, summary, factHash string) error {
+	_, err := s.db.Exec(`INSERT INTO profiles (user_id, namespace, summary, fact_hash, updated_at) VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(user_id, namespace) DO UPDATE SET summary = ?, fact_hash = ?, updated_at = ?`,
+		userID, namespace, summary, factHash, now(), summary, factHash, now())
 	return err
 }
 
 // --- Conversation Dedup ---
 
-func (s *Store) ConversationExists(userID, contentHash string) (bool, error) {
+func (s *Store) ConversationExists(userID, namespace, contentHash string) (bool, error) {
 	var count int
-	err := s.db.QueryRow("SELECT COUNT(*) FROM processed_conversations WHERE user_id = ? AND content_hash = ?", userID, contentHash).Scan(&count)
+	err := s.db.QueryRow("SELECT COUNT(*) FROM processed_conversations WHERE user_id = ? AND namespace = ? AND content_hash = ?", userID, namespace, contentHash).Scan(&count)
 	return count > 0, err
 }
 
-func (s *Store) MarkConversationProcessed(userID, contentHash string) error {
-	_, err := s.db.Exec("INSERT OR IGNORE INTO processed_conversations (user_id, content_hash, created_at) VALUES (?, ?, ?)", userID, contentHash, now())
+func (s *Store) MarkConversationProcessed(userID, namespace, contentHash string) error {
+	_, err := s.db.Exec("INSERT OR IGNORE INTO processed_conversations (user_id, namespace, content_hash, created_at) VALUES (?, ?, ?, ?)", userID, namespace, contentHash, now())
 	return err
 }
 
 // --- Entities ---
 
-func (s *Store) GetAllEntities(userID string, limit int) ([]Entity, error) {
-	rows, err := s.db.Query("SELECT id, name, type FROM entities WHERE user_id = ? ORDER BY created_at DESC LIMIT ?", userID, limit)
+func (s *Store) GetAllEntities(userID, namespace string, limit int) ([]Entity, error) {
+	rows, err := s.db.Query("SELECT id, name, type FROM entities WHERE user_id = ? AND namespace = ? ORDER BY created_at DESC LIMIT ?", userID, namespace, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -637,19 +679,19 @@ func (s *Store) GetAllEntities(userID string, limit int) ([]Entity, error) {
 	return entities, rows.Err()
 }
 
-func (s *Store) UpsertEntity(userID, name, entityType string) (string, error) {
+func (s *Store) UpsertEntity(userID, namespace, name, entityType string) (string, error) {
 	id := newID()
 	ts := now()
-	_, err := s.db.Exec(`INSERT INTO entities (id, user_id, name, type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT(user_id, name, type) DO UPDATE SET updated_at = ?`,
-		id, userID, name, entityType, ts, ts, ts)
+	_, err := s.db.Exec(`INSERT INTO entities (id, user_id, namespace, name, type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(user_id, namespace, name, type) DO UPDATE SET updated_at = ?`,
+		id, userID, namespace, name, entityType, ts, ts, ts)
 	if err != nil {
 		return "", fmt.Errorf("upsert entity: %w", err)
 	}
 
 	// Return the actual ID (might be existing)
 	var actualID string
-	err = s.db.QueryRow("SELECT id FROM entities WHERE user_id = ? AND name = ? AND type = ?", userID, name, entityType).Scan(&actualID)
+	err = s.db.QueryRow("SELECT id FROM entities WHERE user_id = ? AND namespace = ? AND name = ? AND type = ?", userID, namespace, name, entityType).Scan(&actualID)
 	return actualID, err
 }
 
@@ -670,16 +712,16 @@ func (s *Store) UpsertEntityEmbedding(entityID string, embedding []float32) erro
 
 // --- Relations ---
 
-func (s *Store) UpsertRelation(userID, sourceID, relation, targetID string) error {
+func (s *Store) UpsertRelation(userID, namespace, sourceID, relation, targetID string) error {
 	id := newID()
 	ts := now()
-	_, err := s.db.Exec(`INSERT INTO relations (id, user_id, source_id, relation, target_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(user_id, source_id, relation, target_id) DO UPDATE SET updated_at = ?`,
-		id, userID, sourceID, relation, targetID, ts, ts, ts)
+	_, err := s.db.Exec(`INSERT INTO relations (id, user_id, namespace, source_id, relation, target_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(user_id, namespace, source_id, relation, target_id) DO UPDATE SET updated_at = ?`,
+		id, userID, namespace, sourceID, relation, targetID, ts, ts, ts)
 	return err
 }
 
-func (s *Store) GetAllRelations(userID string, limit int) ([]Relation, error) {
+func (s *Store) GetAllRelations(userID, namespace string, limit int) ([]Relation, error) {
 	rows, err := s.db.Query(`
 		SELECT r.id, r.relation,
 		       s.name, s.type,
@@ -687,10 +729,10 @@ func (s *Store) GetAllRelations(userID string, limit int) ([]Relation, error) {
 		FROM relations r
 		JOIN entities s ON s.id = r.source_id
 		JOIN entities t ON t.id = r.target_id
-		WHERE r.user_id = ?
+		WHERE r.user_id = ? AND r.namespace = ?
 		ORDER BY r.created_at DESC
 		LIMIT ?
-	`, userID, limit)
+	`, userID, namespace, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -709,7 +751,7 @@ func (s *Store) GetAllRelations(userID string, limit int) ([]Relation, error) {
 
 // ExpandRelations performs BFS from seed entity IDs, following relation edges
 // up to maxDepth hops. Returns deduplicated relations with hop distance.
-func (s *Store) ExpandRelations(seedIDs []string, userID string, maxDepth int, limit int) ([]Relation, error) {
+func (s *Store) ExpandRelations(seedIDs []string, userID, namespace string, maxDepth int, limit int) ([]Relation, error) {
 	if len(seedIDs) == 0 {
 		return nil, nil
 	}
@@ -729,8 +771,8 @@ func (s *Store) ExpandRelations(seedIDs []string, userID string, maxDepth int, l
 		}
 
 		placeholders := make([]string, len(ids))
-		args := make([]any, 0, len(ids)*2+2)
-		args = append(args, userID)
+		args := make([]any, 0, len(ids)*2+3)
+		args = append(args, userID, namespace)
 		for i, id := range ids {
 			placeholders[i] = "?"
 			args = append(args, id)
@@ -748,7 +790,7 @@ func (s *Store) ExpandRelations(seedIDs []string, userID string, maxDepth int, l
 			FROM relations r
 			JOIN entities s ON s.id = r.source_id
 			JOIN entities t ON t.id = r.target_id
-			WHERE r.user_id = ?
+			WHERE r.user_id = ? AND r.namespace = ?
 			  AND (r.source_id IN (%s) OR r.target_id IN (%s))
 			LIMIT ?
 		`, inClause, inClause)
@@ -793,7 +835,7 @@ func (s *Store) ExpandRelations(seedIDs []string, userID string, maxDepth int, l
 
 // SearchEntityIDs returns entity IDs matching the query embedding via KNN.
 // Only entities with cosine similarity >= minSimilarity are returned.
-func (s *Store) SearchEntityIDs(queryEmbedding []float32, userID string, limit int, minSimilarity float64) ([]string, error) {
+func (s *Store) SearchEntityIDs(queryEmbedding []float32, userID, namespace string, limit int, minSimilarity float64) ([]string, error) {
 	embJSON, err := json.Marshal(queryEmbedding)
 	if err != nil {
 		return nil, err
@@ -810,7 +852,8 @@ func (s *Store) SearchEntityIDs(queryEmbedding []float32, userID string, limit i
 		WHERE ee.embedding MATCH ?
 		  AND k = ?
 		  AND e.user_id = ?
-	`, string(embJSON), kFetch, userID)
+		  AND e.namespace = ?
+	`, string(embJSON), kFetch, userID, namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -834,7 +877,7 @@ func (s *Store) SearchEntityIDs(queryEmbedding []float32, userID string, limit i
 	return ids, rows.Err()
 }
 
-func (s *Store) SearchRelations(queryEmbedding []float32, userID string, limit int) ([]Relation, error) {
+func (s *Store) SearchRelations(queryEmbedding []float32, userID, namespace string, limit int) ([]Relation, error) {
 	embJSON, err := json.Marshal(queryEmbedding)
 	if err != nil {
 		return nil, err
@@ -854,7 +897,8 @@ func (s *Store) SearchRelations(queryEmbedding []float32, userID string, limit i
 		WHERE ee.embedding MATCH ?
 		  AND k = ?
 		  AND e.user_id = ?
-	`, string(embJSON), kFetch, userID)
+		  AND e.namespace = ?
+	`, string(embJSON), kFetch, userID, namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -877,8 +921,8 @@ func (s *Store) SearchRelations(queryEmbedding []float32, userID string, limit i
 
 	// Build IN clause for matched entity IDs
 	placeholders := make([]string, len(entityIDs))
-	args := make([]any, 0, len(entityIDs)*2+2)
-	args = append(args, userID)
+	args := make([]any, 0, len(entityIDs)*2+3)
+	args = append(args, userID, namespace)
 	for i, id := range entityIDs {
 		placeholders[i] = "?"
 		args = append(args, id)
@@ -898,7 +942,7 @@ func (s *Store) SearchRelations(queryEmbedding []float32, userID string, limit i
 		FROM relations r
 		JOIN entities s ON s.id = r.source_id
 		JOIN entities t ON t.id = r.target_id
-		WHERE r.user_id = ?
+		WHERE r.user_id = ? AND r.namespace = ?
 		  AND (r.source_id IN (%s) OR r.target_id IN (%s))
 		ORDER BY r.created_at DESC
 		LIMIT ?

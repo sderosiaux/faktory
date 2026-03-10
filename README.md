@@ -4,8 +4,9 @@ Memory library for Go agents. Give your agent persistent, structured memory acro
 
 ```go
 mem, _ := faktory.New(faktory.Config{LLMAPIKey: "sk-..."})
-mem.Add(ctx, messages, userID)                  // extract & reconcile facts + entity graph
+mem.Add(ctx, messages, userID)                   // extract & reconcile facts + entity graph
 recall, _ := mem.Recall(ctx, query, userID, nil) // facts + graph traversal + profile
+mem.Search(ctx, query, userID, 5, faktory.WithNamespace("work")) // namespace isolation
 ```
 
 Single SQLite file. No external services. Works with any OpenAI-compatible API.
@@ -39,13 +40,15 @@ That's it. faktory handles fact extraction, contradiction resolution, entity gra
 
 ## Use cases
 
-**Customer support agent** — User chats over weeks. faktory remembers their plan, past issues, preferences. `Recall("billing question")` pulls relevant history without the user repeating themselves.
+**Customer support agent** — User chats over weeks. faktory remembers their plan, past issues, preferences. `Recall("billing question")` pulls relevant history without the user repeating themselves. Use `WithNamespace(ticketID)` to isolate per-ticket context.
 
 **Personal assistant** — User tells it about their life over time. faktory builds the entity graph (people, places, relationships). "Remind me about my trip plans" works because the graph connects Tokyo to Emma to Sophie.
 
 **Sales agent** — Each prospect gets a user_id. The agent remembers what was discussed, objections raised, preferences. `Profile()` gives the team a snapshot before the next call.
 
 **Tutoring agent** — Remembers what the student knows and struggles with. Temporal decay naturally deprioritizes topics the student has mastered.
+
+**Multi-tenant SaaS** — Isolate memories per tenant with `WithNamespace(tenantID)`. Same user_id, completely separate memory spaces.
 
 ## Install
 
@@ -73,6 +76,9 @@ result, err := mem.Add(ctx, []faktory.Message{
     {Role: "user", Content: "I'm Alice, I live in Lyon, I work at Acme."},
 }, "alice")
 // result.Added, result.Updated, result.Deleted, result.Tokens
+
+// Namespace-scoped — isolate memories by project, tenant, or conversation
+result, err = mem.Add(ctx, messages, "alice", faktory.WithNamespace("project-x"))
 ```
 
 `Add()` extracts facts, reconciles contradictions (UPDATE replaces "lives in Lyon" with "lives in Marseille"), builds an entity graph, and cleans up stale relations.
@@ -84,7 +90,8 @@ result, err := mem.Add(ctx, []faktory.Message{
 recall, err := mem.Recall(ctx, "where does alice work?", "alice", &faktory.RecallOptions{
     MaxFacts:       10,
     MaxRelations:   10,
-    IncludeProfile: true,  // prepend cached user profile
+    IncludeProfile: true,      // prepend cached user profile
+    Namespace:      "project-x", // scope to namespace (empty = all)
 })
 // recall.Facts, recall.Relations, recall.Summary (pre-formatted for system prompt)
 
@@ -111,6 +118,7 @@ No LLM calls on the read path except profile generation on cache miss.
 mem.Update(ctx, factID, "new text")      // re-embeds automatically
 mem.Delete(ctx, factID)
 mem.DeleteAll(ctx, "alice")              // all facts, entities, relations, profile
+mem.DeleteAll(ctx, "alice", faktory.WithNamespace("work")) // only the "work" namespace
 mem.Export(ctx, "alice", writer)          // JSONL backup
 mem.Import(ctx, "alice", reader)         // restore from JSONL
 ```
@@ -152,6 +160,11 @@ faktory.Config{
     EmbedModel:     "text-embedding-3-small",        // embedding model
     EmbedDimension: 1536,                            // vector dimension
     Logger:         slog.Default(),                  // nil = silent (default)
+
+    // Custom prompts — override LLM system prompts for domain-specific tuning
+    PromptFactExtraction:   "",  // fact extraction (empty = default)
+    PromptReconciliation:   "",  // fact reconciliation (empty = default)
+    PromptEntityExtraction: "",  // entity + relation extraction (empty = default)
 }
 ```
 
@@ -221,7 +234,15 @@ Tools: `memory_add`, `memory_recall`, `memory_search`, `memory_profile`, `memory
 - **Conservative cleanup** — Relations are only pruned when their entity disappears from all facts
 - **Lazy profiles** — Generated on read, cached until facts change. No LLM calls on Add()
 - **Silent by default** — No logging unless you pass a `*slog.Logger`. Libraries shouldn't pollute stderr
-- **No plugin system** — Fork to customize
+- **Custom prompts over plugins** — Override extraction/reconciliation prompts via Config for domain tuning. No plugin system needed
+- **Namespace scoping** — Optional per-call `WithNamespace()` adds a second isolation dimension. Empty namespace = backward compatible
+
+## Testing
+
+```bash
+go test ./...                           # unit tests only (free, no API calls)
+go test -tags=integration ./...         # unit + integration + quality (requires OPENAI_API_KEY)
+```
 
 ## License
 

@@ -1,0 +1,104 @@
+package faktory
+
+import (
+	"context"
+	"path/filepath"
+	"testing"
+
+	"github.com/sderosiaux/faktory/faktorytest"
+)
+
+func newPromptTestMemory(t *testing.T, fc *faktorytest.FakeCompleter, cfg Config) *Memory {
+	t.Helper()
+	cfg.DBPath = filepath.Join(t.TempDir(), "test.db")
+	cfg.EmbedDimension = 8
+	cfg.Completer = fc
+	cfg.TextEmbedder = &faktorytest.FakeEmbedder{Dim: 8}
+	mem, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { mem.Close() })
+	return mem
+}
+
+func defaultFakeCompleter() *faktorytest.FakeCompleter {
+	return &faktorytest.FakeCompleter{
+		Facts: []string{"likes Go"},
+		Reconcile: []faktorytest.ReconcileAction{
+			{ID: "0", Text: "likes Go", Event: "ADD"},
+		},
+		Entities:      []faktorytest.EntityResult{{Name: "Alice", Type: "person"}},
+		Relations:     []faktorytest.RelationResult{},
+		Tokens:        10,
+		SystemPrompts: make(map[string]string),
+	}
+}
+
+func TestCustomFactExtractionPrompt(t *testing.T) {
+	fc := defaultFakeCompleter()
+	custom := "my custom fact extraction prompt"
+	mem := newPromptTestMemory(t, fc, Config{PromptFactExtraction: custom})
+
+	_, err := mem.Add(context.Background(), []Message{{Role: "user", Content: "hello"}}, "u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := fc.GetSystemPrompt("fact_extraction")
+	if got != custom {
+		t.Errorf("fact_extraction prompt = %q, want %q", got, custom)
+	}
+}
+
+func TestCustomReconciliationPrompt(t *testing.T) {
+	fc := defaultFakeCompleter()
+	custom := "my custom reconciliation prompt"
+	mem := newPromptTestMemory(t, fc, Config{PromptReconciliation: custom})
+
+	_, err := mem.Add(context.Background(), []Message{{Role: "user", Content: "hello"}}, "u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := fc.GetSystemPrompt("reconcile_memory")
+	if got != custom {
+		t.Errorf("reconcile_memory prompt = %q, want %q", got, custom)
+	}
+}
+
+func TestCustomEntityExtractionPrompt(t *testing.T) {
+	fc := defaultFakeCompleter()
+	custom := "my custom entity extraction prompt"
+	mem := newPromptTestMemory(t, fc, Config{PromptEntityExtraction: custom})
+
+	_, err := mem.Add(context.Background(), []Message{{Role: "user", Content: "hello"}}, "u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := fc.GetSystemPrompt("entity_extraction")
+	if got != custom {
+		t.Errorf("entity_extraction prompt = %q, want %q", got, custom)
+	}
+}
+
+func TestDefaultPromptsWhenCustomEmpty(t *testing.T) {
+	fc := defaultFakeCompleter()
+	mem := newPromptTestMemory(t, fc, Config{})
+
+	_, err := mem.Add(context.Background(), []Message{{Role: "user", Content: "hello"}}, "u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := fc.GetSystemPrompt("fact_extraction"); got != factExtractionPrompt {
+		t.Errorf("fact_extraction prompt not default: got %q", got)
+	}
+	if got := fc.GetSystemPrompt("reconcile_memory"); got != reconcilePrompt {
+		t.Errorf("reconcile_memory prompt not default: got %q", got)
+	}
+	if got := fc.GetSystemPrompt("entity_extraction"); got != entityExtractionPrompt {
+		t.Errorf("entity_extraction prompt not default: got %q", got)
+	}
+}

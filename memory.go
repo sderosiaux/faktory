@@ -62,14 +62,15 @@ func (m *Memory) Close() error {
 
 // Add extracts facts and entities from messages, reconciles with existing facts, and stores them.
 // Skips processing if the exact same conversation was already processed for this user.
-func (m *Memory) Add(ctx context.Context, messages []Message, userID string) (*AddResult, error) {
+func (m *Memory) Add(ctx context.Context, messages []Message, userID string, opts ...Option) (*AddResult, error) {
 	if userID == "" {
 		return nil, fmt.Errorf("user_id is required")
 	}
+	o := resolveOpts(opts)
 
 	// Conversation-level dedup: skip if exact same messages already processed
 	contentHash := hashFact(formatMessages(messages))
-	if exists, err := m.store.ConversationExists(userID, contentHash); err == nil && exists {
+	if exists, err := m.store.ConversationExists(userID, o.namespace, contentHash); err == nil && exists {
 		return &AddResult{}, nil
 	}
 
@@ -88,13 +89,13 @@ func (m *Memory) Add(ctx context.Context, messages []Message, userID string) (*A
 	// Fact pipeline
 	go func() {
 		defer wg.Done()
-		factResult, factErr = m.addFacts(ctx, messages, userID)
+		factResult, factErr = m.addFacts(ctx, messages, userID, o.namespace)
 	}()
 
 	// Graph pipeline (non-fatal)
 	go func() {
 		defer wg.Done()
-		graphTokens, graphEntities, graphRelations, graphErr = m.addGraph(ctx, messages, userID)
+		graphTokens, graphEntities, graphRelations, graphErr = m.addGraph(ctx, messages, userID, o.namespace)
 	}()
 
 	wg.Wait()
@@ -115,7 +116,7 @@ func (m *Memory) Add(ctx context.Context, messages []Message, userID string) (*A
 	factResult.ExtractedRelations = graphRelations
 
 	// Mark conversation as processed for future dedup
-	_ = m.store.MarkConversationProcessed(userID, contentHash)
+	_ = m.store.MarkConversationProcessed(userID, o.namespace, contentHash)
 
 	factResult.Tokens += graphTokens
 	return factResult, nil
@@ -123,14 +124,19 @@ func (m *Memory) Add(ctx context.Context, messages []Message, userID string) (*A
 
 // --- Fact Pipeline ---
 
-func (m *Memory) addFacts(ctx context.Context, messages []Message, userID string) (*AddResult, error) {
+func (m *Memory) addFacts(ctx context.Context, messages []Message, userID, namespace string) (*AddResult, error) {
 	messages = truncateMessages(m.log, messages, maxMessageChars)
 	userContent := formatMessages(messages)
 
 	totalTokens := 0
 
+	factPrompt := factExtractionPrompt
+	if m.cfg.PromptFactExtraction != "" {
+		factPrompt = m.cfg.PromptFactExtraction
+	}
+
 	var extraction FactExtractionResult
-	tokens, err := m.llm.Complete(ctx, factExtractionPrompt, userContent, "fact_extraction", factExtractionSchema, &extraction)
+	tokens, err := m.llm.Complete(ctx, factPrompt, userContent, "fact_extraction", factExtractionSchema, &extraction)
 	totalTokens += tokens
 	if err != nil {
 		return nil, fmt.Errorf("extract facts: %w", err)
@@ -152,7 +158,7 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID string
 	var hashes []string
 	for _, factText := range extraction.Facts {
 		h := hashFact(factText)
-		exists, err := m.store.FactExistsByHash(userID, h)
+		exists, err := m.store.FactExistsByHash(userID, namespace, h)
 		if err != nil {
 			return nil, fmt.Errorf("check hash: %w", err)
 		}
@@ -176,7 +182,7 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID string
 	// Search similar for each embedded fact
 	var candidates []candidateFact
 	for i, factText := range textsToEmbed {
-		similar, err := m.store.SearchFacts(embeddings[i], userID, 5)
+		similar, err := m.store.SearchFacts(embeddings[i], userID, namespace, 5)
 		if err != nil {
 			return nil, fmt.Errorf("search similar: %w", err)
 		}
@@ -225,8 +231,13 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID string
 		strings.Join(newLines, "\n"))
 
 	// Reconcile via LLM
+	reconPrompt := reconcilePrompt
+	if m.cfg.PromptReconciliation != "" {
+		reconPrompt = m.cfg.PromptReconciliation
+	}
+
 	var reconciliation ReconcileResult
-	tokens, err = m.llm.Complete(ctx, reconcilePrompt, reconcileInput, "reconcile_memory", reconcileSchema, &reconciliation)
+	tokens, err = m.llm.Complete(ctx, reconPrompt, reconcileInput, "reconcile_memory", reconcileSchema, &reconciliation)
 	totalTokens += tokens
 	if err != nil {
 		return nil, fmt.Errorf("reconcile: %w", err)
@@ -251,7 +262,7 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID string
 					return nil, fmt.Errorf("embed new fact: %w", err)
 				}
 			}
-			id, err := m.store.InsertFact(userID, action.Text, hashFact(action.Text), emb)
+			id, err := m.store.InsertFact(userID, namespace, action.Text, hashFact(action.Text), emb)
 			if err != nil {
 				return nil, fmt.Errorf("insert fact: %w", err)
 			}
@@ -294,7 +305,7 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID string
 
 	// Cleanup stale relations after fact updates/deletes
 	if len(deletedTexts) > 0 {
-		if cleaned, err := m.store.CleanupStaleRelations(userID, deletedTexts); err != nil {
+		if cleaned, err := m.store.CleanupStaleRelations(userID, namespace, deletedTexts); err != nil {
 			m.log.Warn("stale relation cleanup error", "err", err)
 		} else if cleaned > 0 {
 			m.log.Info("cleaned stale relations", "count", cleaned)
@@ -308,12 +319,17 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID string
 
 // --- Graph Pipeline ---
 
-func (m *Memory) addGraph(ctx context.Context, messages []Message, userID string) (int, []EntityRef, []RelationRef, error) {
+func (m *Memory) addGraph(ctx context.Context, messages []Message, userID, namespace string) (int, []EntityRef, []RelationRef, error) {
 	messages = truncateMessages(m.log, messages, maxMessageChars)
 	userContent := formatUserMessages(messages)
 
+	entPrompt := entityExtractionPrompt
+	if m.cfg.PromptEntityExtraction != "" {
+		entPrompt = m.cfg.PromptEntityExtraction
+	}
+
 	var extraction EntityExtractionResult
-	tokens, err := m.llm.Complete(ctx, entityExtractionPrompt, userContent, "entity_extraction", entityExtractionSchema, &extraction)
+	tokens, err := m.llm.Complete(ctx, entPrompt, userContent, "entity_extraction", entityExtractionSchema, &extraction)
 	if err != nil {
 		return tokens, nil, nil, fmt.Errorf("extract entities: %w", err)
 	}
@@ -334,7 +350,7 @@ func (m *Memory) addGraph(ctx context.Context, messages []Message, userID string
 
 		var corrected EntityExtractionResult
 		retryTokens, retryErr := m.llm.CompleteWithCorrection(
-			ctx, entityExtractionPrompt, userContent, string(previousJSON), correction,
+			ctx, entPrompt, userContent, string(previousJSON), correction,
 			"entity_extraction", entityExtractionSchema, &corrected,
 		)
 		tokens += retryTokens
@@ -372,7 +388,7 @@ func (m *Memory) addGraph(ctx context.Context, messages []Message, userID string
 			continue
 		}
 
-		id, err := m.store.UpsertEntity(userID, name, e.Type)
+		id, err := m.store.UpsertEntity(userID, namespace, name, e.Type)
 		if err != nil {
 			return tokens, nil, nil, fmt.Errorf("upsert entity %q: %w", name, err)
 		}
@@ -404,7 +420,7 @@ func (m *Memory) addGraph(ctx context.Context, messages []Message, userID string
 
 		sourceID, ok := entityKeyToID[entityKey(source)]
 		if !ok {
-			id, err := m.store.UpsertEntity(userID, source, "other")
+			id, err := m.store.UpsertEntity(userID, namespace, source, "other")
 			if err != nil {
 				return tokens, nil, nil, fmt.Errorf("upsert source entity %q: %w", source, err)
 			}
@@ -414,7 +430,7 @@ func (m *Memory) addGraph(ctx context.Context, messages []Message, userID string
 
 		targetID, ok := entityKeyToID[entityKey(target)]
 		if !ok {
-			id, err := m.store.UpsertEntity(userID, target, "other")
+			id, err := m.store.UpsertEntity(userID, namespace, target, "other")
 			if err != nil {
 				return tokens, nil, nil, fmt.Errorf("upsert target entity %q: %w", target, err)
 			}
@@ -422,7 +438,7 @@ func (m *Memory) addGraph(ctx context.Context, messages []Message, userID string
 			entityKeyToID[entityKey(target)] = id
 		}
 
-		if err := m.store.UpsertRelation(userID, sourceID, r.Relation, targetID); err != nil {
+		if err := m.store.UpsertRelation(userID, namespace, sourceID, r.Relation, targetID); err != nil {
 			return tokens, nil, nil, fmt.Errorf("upsert relation: %w", err)
 		}
 	}
@@ -434,20 +450,21 @@ func (m *Memory) addGraph(ctx context.Context, messages []Message, userID string
 
 // Search finds facts similar to the query for a given user.
 // Results are re-ranked with temporal decay scoring and access counts are bumped.
-func (m *Memory) Search(ctx context.Context, query string, userID string, limit int) ([]Fact, error) {
+func (m *Memory) Search(ctx context.Context, query string, userID string, limit int, opts ...Option) ([]Fact, error) {
 	if userID == "" {
 		return nil, fmt.Errorf("user_id is required")
 	}
 	if limit <= 0 {
 		limit = 10
 	}
+	o := resolveOpts(opts)
 
 	emb, err := m.embedder.Embed(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("embed query: %w", err)
 	}
 
-	facts, err := m.store.SearchFacts(emb, userID, limit*2)
+	facts, err := m.store.SearchFacts(emb, userID, o.namespace, limit*2)
 	if err != nil {
 		return nil, err
 	}
@@ -472,14 +489,15 @@ func (m *Memory) Get(ctx context.Context, factID string) (*Fact, error) {
 }
 
 // GetAll retrieves all facts for a user.
-func (m *Memory) GetAll(ctx context.Context, userID string, limit int) ([]Fact, error) {
+func (m *Memory) GetAll(ctx context.Context, userID string, limit int, opts ...Option) ([]Fact, error) {
 	if userID == "" {
 		return nil, fmt.Errorf("user_id is required")
 	}
 	if limit <= 0 {
 		limit = 100
 	}
-	return m.store.GetAllFacts(userID, limit)
+	o := resolveOpts(opts)
+	return m.store.GetAllFacts(userID, o.namespace, limit)
 }
 
 // Update manually updates a fact's text, re-embeds it.
@@ -553,43 +571,47 @@ func (m *Memory) Undo(ctx context.Context, factID string) error {
 }
 
 // PruneHistory deletes history entries older than the given duration for a user.
-func (m *Memory) PruneHistory(_ context.Context, userID string, olderThan time.Duration) (int, error) {
+func (m *Memory) PruneHistory(_ context.Context, userID string, olderThan time.Duration, opts ...Option) (int, error) {
+	o := resolveOpts(opts)
 	cutoff := time.Now().Add(-olderThan)
-	return m.store.PruneHistoryForUser(userID, cutoff)
+	return m.store.PruneHistoryForUser(userID, o.namespace, cutoff)
 }
 
 // DeleteAll removes all data (facts, embeddings, entities, relations) for a user.
-func (m *Memory) DeleteAll(ctx context.Context, userID string) error {
+func (m *Memory) DeleteAll(ctx context.Context, userID string, opts ...Option) error {
 	if userID == "" {
 		return fmt.Errorf("user_id is required")
 	}
-	return m.store.DeleteAllForUser(userID)
+	o := resolveOpts(opts)
+	return m.store.DeleteAllForUser(userID, o.namespace)
 }
 
 // SearchRelations finds relations matching a query for a user via entity embedding similarity.
-func (m *Memory) SearchRelations(ctx context.Context, query string, userID string, limit int) ([]Relation, error) {
+func (m *Memory) SearchRelations(ctx context.Context, query string, userID string, limit int, opts ...Option) ([]Relation, error) {
 	if userID == "" {
 		return nil, fmt.Errorf("user_id is required")
 	}
 	if limit <= 0 {
 		limit = 10
 	}
+	o := resolveOpts(opts)
 	emb, err := m.embedder.Embed(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("embed query: %w", err)
 	}
-	return m.store.SearchRelations(emb, userID, limit)
+	return m.store.SearchRelations(emb, userID, o.namespace, limit)
 }
 
 // GetAllRelations retrieves all relations for a user.
-func (m *Memory) GetAllRelations(ctx context.Context, userID string, limit int) ([]Relation, error) {
+func (m *Memory) GetAllRelations(ctx context.Context, userID string, limit int, opts ...Option) ([]Relation, error) {
 	if userID == "" {
 		return nil, fmt.Errorf("user_id is required")
 	}
 	if limit <= 0 {
 		limit = 100
 	}
-	return m.store.GetAllRelations(userID, limit)
+	o := resolveOpts(opts)
+	return m.store.GetAllRelations(userID, o.namespace, limit)
 }
 
 // --- Recall (unified retrieval) ---
@@ -603,6 +625,7 @@ func (m *Memory) Recall(ctx context.Context, query string, userID string, opts *
 	}
 
 	maxFacts, maxRels := 10, 10
+	var ns string
 	if opts != nil {
 		if opts.MaxFacts > 0 {
 			maxFacts = opts.MaxFacts
@@ -610,6 +633,7 @@ func (m *Memory) Recall(ctx context.Context, query string, userID string, opts *
 		if opts.MaxRelations > 0 {
 			maxRels = opts.MaxRelations
 		}
+		ns = opts.Namespace
 	}
 
 	emb, err := m.embedder.Embed(ctx, query)
@@ -628,11 +652,11 @@ func (m *Memory) Recall(ctx context.Context, query string, userID string, opts *
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		facts, factErr = m.store.SearchFacts(emb, userID, maxFacts*2)
+		facts, factErr = m.store.SearchFacts(emb, userID, ns, maxFacts*2)
 	}()
 	go func() {
 		defer wg.Done()
-		entityIDs, relErr = m.store.SearchEntityIDs(emb, userID, 10, 0.5)
+		entityIDs, relErr = m.store.SearchEntityIDs(emb, userID, ns, 10, 0.5)
 	}()
 	wg.Wait()
 
@@ -658,7 +682,7 @@ func (m *Memory) Recall(ctx context.Context, query string, userID string, opts *
 	if expandLimit > 20 {
 		expandLimit = 20
 	}
-	rels, err := m.store.ExpandRelations(entityIDs, userID, 2, expandLimit)
+	rels, err := m.store.ExpandRelations(entityIDs, userID, ns, 2, expandLimit)
 	if err != nil {
 		return nil, fmt.Errorf("expand relations: %w", err)
 	}
@@ -667,7 +691,7 @@ func (m *Memory) Recall(ctx context.Context, query string, userID string, opts *
 	var sb strings.Builder
 
 	if opts != nil && opts.IncludeProfile {
-		profile, err := m.Profile(ctx, userID)
+		profile, err := m.Profile(ctx, userID, WithNamespace(ns))
 		if err != nil {
 			m.log.Warn("profile generation error", "err", err)
 		} else if profile != "" {
@@ -706,12 +730,13 @@ func (m *Memory) Recall(ctx context.Context, query string, userID string, opts *
 
 // Profile generates a concise user summary from all stored facts and relations.
 // The result is cached and only regenerated when facts change.
-func (m *Memory) Profile(ctx context.Context, userID string) (string, error) {
+func (m *Memory) Profile(ctx context.Context, userID string, opts ...Option) (string, error) {
 	if userID == "" {
 		return "", fmt.Errorf("user_id is required")
 	}
+	o := resolveOpts(opts)
 
-	facts, err := m.store.GetAllFacts(userID, 200)
+	facts, err := m.store.GetAllFacts(userID, o.namespace, 200)
 	if err != nil {
 		return "", fmt.Errorf("get facts: %w", err)
 	}
@@ -721,7 +746,7 @@ func (m *Memory) Profile(ctx context.Context, userID string) (string, error) {
 
 	currentHash := profileFactHash(facts)
 
-	cached, storedHash, err := m.store.GetProfile(userID)
+	cached, storedHash, err := m.store.GetProfile(userID, o.namespace)
 	if err != nil {
 		return "", fmt.Errorf("get profile: %w", err)
 	}
@@ -729,7 +754,7 @@ func (m *Memory) Profile(ctx context.Context, userID string) (string, error) {
 		return cached, nil
 	}
 
-	rels, err := m.store.GetAllRelations(userID, 100)
+	rels, err := m.store.GetAllRelations(userID, o.namespace, 100)
 	if err != nil {
 		return "", fmt.Errorf("get relations: %w", err)
 	}
@@ -757,7 +782,7 @@ func (m *Memory) Profile(ctx context.Context, userID string) (string, error) {
 		return "", fmt.Errorf("generate profile: %w", err)
 	}
 
-	_ = m.store.UpsertProfile(userID, result.Profile, currentHash)
+	_ = m.store.UpsertProfile(userID, o.namespace, result.Profile, currentHash)
 
 	return result.Profile, nil
 }
@@ -765,15 +790,16 @@ func (m *Memory) Profile(ctx context.Context, userID string) (string, error) {
 // --- Import / Export ---
 
 // Export writes all facts, entities, and relations for a user as JSONL.
-func (m *Memory) Export(ctx context.Context, userID string, w io.Writer) error {
+func (m *Memory) Export(ctx context.Context, userID string, w io.Writer, opts ...Option) error {
 	if userID == "" {
 		return fmt.Errorf("user_id is required")
 	}
+	o := resolveOpts(opts)
 
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
 
-	facts, err := m.store.GetAllFacts(userID, 100_000)
+	facts, err := m.store.GetAllFacts(userID, o.namespace, 100_000)
 	if err != nil {
 		return fmt.Errorf("export facts: %w", err)
 	}
@@ -783,7 +809,7 @@ func (m *Memory) Export(ctx context.Context, userID string, w io.Writer) error {
 		}
 	}
 
-	entities, err := m.store.GetAllEntities(userID, 100_000)
+	entities, err := m.store.GetAllEntities(userID, o.namespace, 100_000)
 	if err != nil {
 		return fmt.Errorf("export entities: %w", err)
 	}
@@ -793,7 +819,7 @@ func (m *Memory) Export(ctx context.Context, userID string, w io.Writer) error {
 		}
 	}
 
-	rels, err := m.store.GetAllRelations(userID, 100_000)
+	rels, err := m.store.GetAllRelations(userID, o.namespace, 100_000)
 	if err != nil {
 		return fmt.Errorf("export relations: %w", err)
 	}
@@ -808,10 +834,11 @@ func (m *Memory) Export(ctx context.Context, userID string, w io.Writer) error {
 
 // Import reads JSONL records and inserts them for a user. Facts and entities
 // are embedded on import. Existing data is not cleared first.
-func (m *Memory) Import(ctx context.Context, userID string, r io.Reader) error {
+func (m *Memory) Import(ctx context.Context, userID string, r io.Reader, opts ...Option) error {
 	if userID == "" {
 		return fmt.Errorf("user_id is required")
 	}
+	o := resolveOpts(opts)
 
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
@@ -848,7 +875,7 @@ func (m *Memory) Import(ctx context.Context, userID string, r io.Reader) error {
 			return fmt.Errorf("embed facts: %w", err)
 		}
 		for i, text := range factTexts {
-			if _, err := m.store.InsertFact(userID, text, hashFact(text), embs[i]); err != nil {
+			if _, err := m.store.InsertFact(userID, o.namespace, text, hashFact(text), embs[i]); err != nil {
 				return fmt.Errorf("insert fact: %w", err)
 			}
 		}
@@ -864,7 +891,7 @@ func (m *Memory) Import(ctx context.Context, userID string, r io.Reader) error {
 			return fmt.Errorf("embed entities: %w", err)
 		}
 		for i, rec := range entityRecords {
-			id, err := m.store.UpsertEntity(userID, rec.Name, rec.EntityType)
+			id, err := m.store.UpsertEntity(userID, o.namespace, rec.Name, rec.EntityType)
 			if err != nil {
 				return fmt.Errorf("upsert entity: %w", err)
 			}
@@ -875,15 +902,15 @@ func (m *Memory) Import(ctx context.Context, userID string, r io.Reader) error {
 	}
 
 	for _, rec := range relationRecords {
-		srcID, err := m.store.UpsertEntity(userID, rec.Source, "other")
+		srcID, err := m.store.UpsertEntity(userID, o.namespace, rec.Source, "other")
 		if err != nil {
 			return fmt.Errorf("upsert source: %w", err)
 		}
-		tgtID, err := m.store.UpsertEntity(userID, rec.Target, "other")
+		tgtID, err := m.store.UpsertEntity(userID, o.namespace, rec.Target, "other")
 		if err != nil {
 			return fmt.Errorf("upsert target: %w", err)
 		}
-		if err := m.store.UpsertRelation(userID, srcID, rec.Relation, tgtID); err != nil {
+		if err := m.store.UpsertRelation(userID, o.namespace, srcID, rec.Relation, tgtID); err != nil {
 			return fmt.Errorf("upsert relation: %w", err)
 		}
 	}

@@ -91,11 +91,32 @@ type FactHistoryEntry struct {
 	CreatedAt string `json:"created_at"`
 }
 
+// Option configures per-call behavior for Memory methods.
+type Option func(*callOptions)
+
+type callOptions struct {
+	namespace string
+}
+
+// WithNamespace scopes the operation to the given namespace.
+func WithNamespace(ns string) Option {
+	return func(o *callOptions) { o.namespace = ns }
+}
+
+func resolveOpts(opts []Option) callOptions {
+	var o callOptions
+	for _, fn := range opts {
+		fn(&o)
+	}
+	return o
+}
+
 // RecallOptions configures the Recall() method.
 type RecallOptions struct {
-	MaxFacts       int  `json:"max_facts,omitempty"`
-	MaxRelations   int  `json:"max_relations,omitempty"`
-	IncludeProfile bool `json:"include_profile,omitempty"`
+	MaxFacts       int    `json:"max_facts,omitempty"`
+	MaxRelations   int    `json:"max_relations,omitempty"`
+	IncludeProfile bool   `json:"include_profile,omitempty"`
+	Namespace      string `json:"namespace,omitempty"`
 }
 
 // RecallResult combines facts and relations into a single response
@@ -137,6 +158,10 @@ type Config struct {
 	HTTPClient     *http.Client  // Fully custom HTTP client (skips timeout and retry when set)
 	Completer      Completer     // Custom LLM completer (overrides LLM* fields when set)
 	TextEmbedder   TextEmbedder  // Custom text embedder (overrides Embed* fields when set)
+
+	PromptFactExtraction   string // Override fact extraction system prompt
+	PromptReconciliation   string // Override reconciliation system prompt
+	PromptEntityExtraction string // Override entity extraction system prompt
 }
 
 const defaultHTTPTimeout = 30 * time.Second

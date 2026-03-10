@@ -10,7 +10,7 @@ func TestInsertFactCreatesHistoryEntry(t *testing.T) {
 	s := tempStore(t, 4)
 
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	id, err := s.InsertFact("alice", "likes pizza", "hash1", emb)
+	id, err := s.InsertFact("alice", "", "likes pizza", "hash1", emb)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestUpdateFactCreatesHistoryEntry(t *testing.T) {
 	s := tempStore(t, 4)
 
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	id, err := s.InsertFact("alice", "lives in Paris", "hp", emb)
+	id, err := s.InsertFact("alice", "", "lives in Paris", "hp", emb)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestDeleteFactCreatesHistoryEntry(t *testing.T) {
 	s := tempStore(t, 4)
 
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	id, err := s.InsertFact("alice", "likes pizza", "hash1", emb)
+	id, err := s.InsertFact("alice", "", "likes pizza", "hash1", emb)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestGetFactHistoryNewestFirst(t *testing.T) {
 	s := tempStore(t, 4)
 
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	id, _ := s.InsertFact("alice", "v1", "h1", emb)
+	id, _ := s.InsertFact("alice", "", "v1", "h1", emb)
 	s.UpdateFact(id, "v2", "h2", emb)
 	s.UpdateFact(id, "v3", "h3", emb)
 
@@ -167,7 +167,7 @@ func TestUndoAfterDelete(t *testing.T) {
 	ctx := context.Background()
 
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	id, err := m.store.InsertFact("alice", "likes pizza", hashFact("likes pizza"), emb)
+	id, err := m.store.InsertFact("alice", "", "likes pizza", hashFact("likes pizza"), emb)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +212,7 @@ func TestUndoAfterUpdate(t *testing.T) {
 	ctx := context.Background()
 
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	id, err := m.store.InsertFact("alice", "lives in Paris", hashFact("lives in Paris"), emb)
+	id, err := m.store.InsertFact("alice", "", "lives in Paris", hashFact("lives in Paris"), emb)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +240,7 @@ func TestUndoAfterAdd(t *testing.T) {
 	ctx := context.Background()
 
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	id, err := m.store.InsertFact("alice", "likes pizza", hashFact("likes pizza"), emb)
+	id, err := m.store.InsertFact("alice", "", "likes pizza", hashFact("likes pizza"), emb)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,8 +261,8 @@ func TestPruneHistory(t *testing.T) {
 	ctx := context.Background()
 
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	id1, _ := m.store.InsertFact("alice", "fact 1", "h1", emb)
-	id2, _ := m.store.InsertFact("alice", "fact 2", "h2", emb)
+	id1, _ := m.store.InsertFact("alice", "", "fact 1", "h1", emb)
+	id2, _ := m.store.InsertFact("alice", "", "fact 2", "h2", emb)
 	_ = id2
 
 	// Backdate history entries for id1
@@ -298,8 +298,8 @@ func TestDeleteAllForUserClearsHistory(t *testing.T) {
 	s := tempStore(t, 4)
 
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	id, _ := s.InsertFact("alice", "fact 1", "h1", emb)
-	s.InsertFact("bob", "bob fact", "h3", emb)
+	id, _ := s.InsertFact("alice", "", "fact 1", "h1", emb)
+	s.InsertFact("bob", "", "bob fact", "h3", emb)
 
 	// Verify alice has history
 	history, _ := s.GetFactHistory(id)
@@ -307,7 +307,7 @@ func TestDeleteAllForUserClearsHistory(t *testing.T) {
 		t.Fatal("expected history for alice")
 	}
 
-	if err := s.DeleteAllForUser("alice"); err != nil {
+	if err := s.DeleteAllForUser("alice", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -322,7 +322,7 @@ func TestGetLatestHistoryEntry(t *testing.T) {
 	s := tempStore(t, 4)
 
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	id, _ := s.InsertFact("alice", "v1", "h1", emb)
+	id, _ := s.InsertFact("alice", "", "v1", "h1", emb)
 	s.UpdateFact(id, "v2", "h2", emb)
 
 	entry, err := s.GetLatestHistoryEntry(id)
@@ -345,7 +345,7 @@ func TestHistoryMethod(t *testing.T) {
 	ctx := context.Background()
 
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	id, _ := m.store.InsertFact("alice", "fact", "h1", emb)
+	id, _ := m.store.InsertFact("alice", "", "fact", "h1", emb)
 
 	history, err := m.History(ctx, id)
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"math"
+	"sync"
 )
 
 // ReconcileAction mirrors the reconciliation action structure.
@@ -37,10 +38,30 @@ type FakeCompleter struct {
 	Entities  []EntityResult
 	Relations []RelationResult
 	Tokens    int
+
+	mu            sync.Mutex
+	SystemPrompts map[string]string // schemaName -> system prompt received
+}
+
+// GetSystemPrompt returns the system prompt captured for a given schema name.
+func (fc *FakeCompleter) GetSystemPrompt(schemaName string) string {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	if fc.SystemPrompts == nil {
+		return ""
+	}
+	return fc.SystemPrompts[schemaName]
 }
 
 // Complete returns canned results based on schemaName.
-func (fc *FakeCompleter) Complete(_ context.Context, _, _ string, schemaName string, _ json.RawMessage, result any) (int, error) {
+func (fc *FakeCompleter) Complete(_ context.Context, system, _ string, schemaName string, _ json.RawMessage, result any) (int, error) {
+	fc.mu.Lock()
+	if fc.SystemPrompts == nil {
+		fc.SystemPrompts = make(map[string]string)
+	}
+	fc.SystemPrompts[schemaName] = system
+	fc.mu.Unlock()
+
 	var payload any
 	switch schemaName {
 	case "fact_extraction":
@@ -71,6 +92,7 @@ func (fc *FakeCompleter) Complete(_ context.Context, _, _ string, schemaName str
 
 // CompleteWithCorrection delegates to Complete, ignoring correction context.
 func (fc *FakeCompleter) CompleteWithCorrection(ctx context.Context, system, user, _, _ string, schemaName string, schema json.RawMessage, result any) (int, error) {
+	// System prompt capture happens inside Complete.
 	return fc.Complete(ctx, system, user, schemaName, schema, result)
 }
 

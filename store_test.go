@@ -32,7 +32,7 @@ func TestInsertAndGetFact(t *testing.T) {
 	s := tempStore(t, 4)
 
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	id, err := s.InsertFact("alice", "likes pizza", "hash1", emb)
+	id, err := s.InsertFact("alice", "", "likes pizza", "hash1", emb)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,11 +56,11 @@ func TestGetAllFacts(t *testing.T) {
 	s := tempStore(t, 4)
 
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	s.InsertFact("alice", "fact 1", "h1", emb)
-	s.InsertFact("alice", "fact 2", "h2", emb)
-	s.InsertFact("bob", "bob fact", "h3", emb)
+	s.InsertFact("alice", "", "fact 1", "h1", emb)
+	s.InsertFact("alice", "", "fact 2", "h2", emb)
+	s.InsertFact("bob", "", "bob fact", "h3", emb)
 
-	facts, err := s.GetAllFacts("alice", 100)
+	facts, err := s.GetAllFacts("alice", "", 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestGetAllFacts(t *testing.T) {
 		t.Errorf("got %d facts, want 2", len(facts))
 	}
 
-	bobFacts, _ := s.GetAllFacts("bob", 100)
+	bobFacts, _ := s.GetAllFacts("bob", "", 100)
 	if len(bobFacts) != 1 {
 		t.Errorf("got %d bob facts, want 1", len(bobFacts))
 	}
@@ -78,7 +78,7 @@ func TestDeleteFact(t *testing.T) {
 	s := tempStore(t, 4)
 
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	id, _ := s.InsertFact("alice", "to delete", "hd", emb)
+	id, _ := s.InsertFact("alice", "", "to delete", "hd", emb)
 
 	if err := s.DeleteFact(id); err != nil {
 		t.Fatal(err)
@@ -97,7 +97,7 @@ func TestUpdateFact(t *testing.T) {
 	s := tempStore(t, 4)
 
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	id, _ := s.InsertFact("alice", "lives in Paris", "hp", emb)
+	id, _ := s.InsertFact("alice", "", "lives in Paris", "hp", emb)
 
 	newEmb := []float32{0.5, 0.6, 0.7, 0.8}
 	if err := s.UpdateFact(id, "lives in Lyon", "hl", newEmb); err != nil {
@@ -114,9 +114,9 @@ func TestHashDedup(t *testing.T) {
 	s := tempStore(t, 4)
 
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	s.InsertFact("alice", "likes pizza", "hash_pizza", emb)
+	s.InsertFact("alice", "", "likes pizza", "hash_pizza", emb)
 
-	exists, err := s.FactExistsByHash("alice", "hash_pizza")
+	exists, err := s.FactExistsByHash("alice", "", "hash_pizza")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,13 +124,13 @@ func TestHashDedup(t *testing.T) {
 		t.Error("expected hash to exist")
 	}
 
-	exists, _ = s.FactExistsByHash("alice", "other_hash")
+	exists, _ = s.FactExistsByHash("alice", "", "other_hash")
 	if exists {
 		t.Error("expected hash to not exist")
 	}
 
 	// Different user, same hash
-	exists, _ = s.FactExistsByHash("bob", "hash_pizza")
+	exists, _ = s.FactExistsByHash("bob", "", "hash_pizza")
 	if exists {
 		t.Error("expected hash to not exist for different user")
 	}
@@ -139,12 +139,12 @@ func TestHashDedup(t *testing.T) {
 func TestSearchFacts(t *testing.T) {
 	s := tempStore(t, 4)
 
-	s.InsertFact("alice", "likes pizza", "h1", []float32{1, 0, 0, 0})
-	s.InsertFact("alice", "lives in Paris", "h2", []float32{0, 1, 0, 0})
-	s.InsertFact("bob", "bob stuff", "h3", []float32{1, 0, 0, 0})
+	s.InsertFact("alice", "", "likes pizza", "h1", []float32{1, 0, 0, 0})
+	s.InsertFact("alice", "", "lives in Paris", "h2", []float32{0, 1, 0, 0})
+	s.InsertFact("bob", "", "bob stuff", "h3", []float32{1, 0, 0, 0})
 
 	// Search with a vector close to "likes pizza"
-	results, err := s.SearchFacts([]float32{0.9, 0.1, 0, 0}, "alice", 5)
+	results, err := s.SearchFacts([]float32{0.9, 0.1, 0, 0}, "alice", "", 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,13 +162,13 @@ func TestSearchFactsUserIsolation(t *testing.T) {
 
 	// Insert many bob facts with identical vectors to crowd out KNN results
 	for i := 0; i < 30; i++ {
-		s.InsertFact("bob", fmt.Sprintf("bob fact %d", i), fmt.Sprintf("bob_%d", i), []float32{1, 0, 0, 0})
+		s.InsertFact("bob", "", fmt.Sprintf("bob fact %d", i), fmt.Sprintf("bob_%d", i), []float32{1, 0, 0, 0})
 	}
 	// Alice has one fact with the same vector direction
-	s.InsertFact("alice", "alice fact", "alice_1", []float32{1, 0, 0, 0})
+	s.InsertFact("alice", "", "alice fact", "alice_1", []float32{1, 0, 0, 0})
 
 	// Search for alice — should find her fact despite bob dominating the KNN
-	results, err := s.SearchFacts([]float32{1, 0, 0, 0}, "alice", 5)
+	results, err := s.SearchFacts([]float32{1, 0, 0, 0}, "alice", "", 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,31 +190,31 @@ func TestDeleteAllForUser(t *testing.T) {
 	s := tempStore(t, 4)
 
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	s.InsertFact("alice", "fact 1", "h1", emb)
-	s.InsertFact("alice", "fact 2", "h2", emb)
-	s.InsertFact("bob", "bob fact", "h3", emb)
+	s.InsertFact("alice", "", "fact 1", "h1", emb)
+	s.InsertFact("alice", "", "fact 2", "h2", emb)
+	s.InsertFact("bob", "", "bob fact", "h3", emb)
 
-	s.UpsertEntity("alice", "Alice", "person")
-	s.UpsertEntity("alice", "Acme", "organization")
-	srcID, _ := s.UpsertEntity("alice", "Alice", "person")
-	tgtID, _ := s.UpsertEntity("alice", "Acme", "organization")
-	s.UpsertRelation("alice", srcID, "works_at", tgtID)
+	s.UpsertEntity("alice", "", "Alice", "person")
+	s.UpsertEntity("alice", "", "Acme", "organization")
+	srcID, _ := s.UpsertEntity("alice", "", "Alice", "person")
+	tgtID, _ := s.UpsertEntity("alice", "", "Acme", "organization")
+	s.UpsertRelation("alice", "", srcID, "works_at", tgtID)
 
-	if err := s.DeleteAllForUser("alice"); err != nil {
+	if err := s.DeleteAllForUser("alice", ""); err != nil {
 		t.Fatal(err)
 	}
 
-	aliceFacts, _ := s.GetAllFacts("alice", 100)
+	aliceFacts, _ := s.GetAllFacts("alice", "", 100)
 	if len(aliceFacts) != 0 {
 		t.Errorf("alice still has %d facts", len(aliceFacts))
 	}
 
-	bobFacts, _ := s.GetAllFacts("bob", 100)
+	bobFacts, _ := s.GetAllFacts("bob", "", 100)
 	if len(bobFacts) != 1 {
 		t.Errorf("bob has %d facts, want 1", len(bobFacts))
 	}
 
-	aliceRels, _ := s.GetAllRelations("alice", 100)
+	aliceRels, _ := s.GetAllRelations("alice", "", 100)
 	if len(aliceRels) != 0 {
 		t.Errorf("alice still has %d relations", len(aliceRels))
 	}
@@ -223,13 +223,13 @@ func TestDeleteAllForUser(t *testing.T) {
 func TestEntityAndRelationUpsert(t *testing.T) {
 	s := tempStore(t, 4)
 
-	id1, err := s.UpsertEntity("alice", "Alice", "person")
+	id1, err := s.UpsertEntity("alice", "", "Alice", "person")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Upsert again should return same ID
-	id2, err := s.UpsertEntity("alice", "Alice", "person")
+	id2, err := s.UpsertEntity("alice", "", "Alice", "person")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,18 +237,18 @@ func TestEntityAndRelationUpsert(t *testing.T) {
 		t.Errorf("upsert returned different IDs: %s vs %s", id1, id2)
 	}
 
-	targetID, _ := s.UpsertEntity("alice", "Acme", "organization")
+	targetID, _ := s.UpsertEntity("alice", "", "Acme", "organization")
 
-	if err := s.UpsertRelation("alice", id1, "works_at", targetID); err != nil {
+	if err := s.UpsertRelation("alice", "", id1, "works_at", targetID); err != nil {
 		t.Fatal(err)
 	}
 
 	// Upsert same relation again should not error
-	if err := s.UpsertRelation("alice", id1, "works_at", targetID); err != nil {
+	if err := s.UpsertRelation("alice", "", id1, "works_at", targetID); err != nil {
 		t.Fatal(err)
 	}
 
-	rels, err := s.GetAllRelations("alice", 100)
+	rels, err := s.GetAllRelations("alice", "", 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,16 +263,16 @@ func TestEntityAndRelationUpsert(t *testing.T) {
 func TestSearchRelations(t *testing.T) {
 	s := tempStore(t, 4)
 
-	srcID, _ := s.UpsertEntity("alice", "Alice", "person")
-	tgtID, _ := s.UpsertEntity("alice", "Lyon", "place")
-	s.UpsertRelation("alice", srcID, "lives_in", tgtID)
+	srcID, _ := s.UpsertEntity("alice", "", "Alice", "person")
+	tgtID, _ := s.UpsertEntity("alice", "", "Lyon", "place")
+	s.UpsertRelation("alice", "", srcID, "lives_in", tgtID)
 
 	// Embed entities with distinct vectors
 	s.UpsertEntityEmbedding(srcID, []float32{1, 0, 0, 0})
 	s.UpsertEntityEmbedding(tgtID, []float32{0, 1, 0, 0})
 
 	// Search with vector close to "Alice"
-	rels, err := s.SearchRelations([]float32{0.9, 0.1, 0, 0}, "alice", 10)
+	rels, err := s.SearchRelations([]float32{0.9, 0.1, 0, 0}, "alice", "", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,13 +281,13 @@ func TestSearchRelations(t *testing.T) {
 	}
 
 	// Search with vector close to "Lyon"
-	rels, _ = s.SearchRelations([]float32{0.1, 0.9, 0, 0}, "alice", 10)
+	rels, _ = s.SearchRelations([]float32{0.1, 0.9, 0, 0}, "alice", "", 10)
 	if len(rels) != 1 {
 		t.Errorf("got %d results for Lyon, want 1", len(rels))
 	}
 
 	// Different user should get no results
-	rels, _ = s.SearchRelations([]float32{1, 0, 0, 0}, "bob", 10)
+	rels, _ = s.SearchRelations([]float32{1, 0, 0, 0}, "bob", "", 10)
 	if len(rels) != 0 {
 		t.Errorf("bob should have 0 results, got %d", len(rels))
 	}
