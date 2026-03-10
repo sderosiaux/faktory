@@ -48,8 +48,18 @@ func main() {
 			mcp.WithString("query", mcp.Required(), mcp.Description("Search query")),
 			mcp.WithNumber("max_facts", mcp.Description("Max facts (default 10)")),
 			mcp.WithNumber("max_relations", mcp.Description("Max relations (default 10)")),
+			mcp.WithBoolean("include_profile", mcp.Description("Prepend a generated user profile summary (default false)")),
 		),
 		handleRecall,
+	)
+
+	// --- memory_profile ---
+	s.AddTool(
+		mcp.NewTool("memory_profile",
+			mcp.WithDescription("Generate a concise user profile summary from all stored facts and relations"),
+			mcp.WithString("user_id", mcp.Required(), mcp.Description("User ID")),
+		),
+		handleProfile,
 	)
 
 	// --- memory_get_all ---
@@ -154,11 +164,13 @@ func handleRecall(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolRe
 
 	maxFacts := int(req.GetFloat("max_facts", 10))
 	maxRels := int(req.GetFloat("max_relations", 10))
+	includeProfile := req.GetBool("include_profile", false)
 
 	return withMemory(func(mem *faktory.Memory) (*mcp.CallToolResult, error) {
 		result, err := mem.Recall(ctx, query, userID, &faktory.RecallOptions{
-			MaxFacts:     maxFacts,
-			MaxRelations: maxRels,
+			MaxFacts:       maxFacts,
+			MaxRelations:   maxRels,
+			IncludeProfile: includeProfile,
 		})
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
@@ -214,6 +226,24 @@ func handleSearchRelations(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 			return mcp.NewToolResultText("No matching relations found."), nil
 		}
 		return mcp.NewToolResultText(sb.String()), nil
+	})
+}
+
+func handleProfile(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	userID := req.GetString("user_id", "")
+	if userID == "" {
+		return mcp.NewToolResultError("user_id is required"), nil
+	}
+
+	return withMemory(func(mem *faktory.Memory) (*mcp.CallToolResult, error) {
+		profile, err := mem.Profile(ctx, userID)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		if profile == "" {
+			return mcp.NewToolResultText("No facts stored for this user."), nil
+		}
+		return mcp.NewToolResultText(profile), nil
 	})
 }
 

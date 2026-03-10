@@ -652,7 +652,8 @@ func (s *Store) ExpandRelations(seedIDs []string, userID string, maxDepth int, l
 }
 
 // SearchEntityIDs returns entity IDs matching the query embedding via KNN.
-func (s *Store) SearchEntityIDs(queryEmbedding []float32, userID string, limit int) ([]string, error) {
+// Only entities with cosine similarity >= minSimilarity are returned.
+func (s *Store) SearchEntityIDs(queryEmbedding []float32, userID string, limit int, minSimilarity float64) ([]string, error) {
 	embJSON, err := json.Marshal(queryEmbedding)
 	if err != nil {
 		return nil, err
@@ -663,7 +664,7 @@ func (s *Store) SearchEntityIDs(queryEmbedding []float32, userID string, limit i
 	}
 
 	rows, err := s.db.Query(`
-		SELECT e.id
+		SELECT e.id, ee.distance
 		FROM entity_embeddings ee
 		JOIN entities e ON e.id = ee.id
 		WHERE ee.embedding MATCH ?
@@ -678,8 +679,12 @@ func (s *Store) SearchEntityIDs(queryEmbedding []float32, userID string, limit i
 	var ids []string
 	for rows.Next() {
 		var id string
-		if err := rows.Scan(&id); err != nil {
+		var dist float64
+		if err := rows.Scan(&id, &dist); err != nil {
 			return nil, err
+		}
+		if 1-dist < minSimilarity {
+			continue
 		}
 		ids = append(ids, id)
 		if len(ids) >= limit {

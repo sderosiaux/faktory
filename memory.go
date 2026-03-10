@@ -425,7 +425,7 @@ func (m *Memory) Search(ctx context.Context, query string, userID string, limit 
 	for i, f := range facts {
 		ids[i] = f.ID
 	}
-	go func() { _ = m.store.BumpAccess(ids) }()
+	_ = m.store.BumpAccess(ids)
 
 	return facts, nil
 }
@@ -534,7 +534,7 @@ func (m *Memory) Recall(ctx context.Context, query string, userID string, opts *
 	}()
 	go func() {
 		defer wg.Done()
-		entityIDs, relErr = m.store.SearchEntityIDs(emb, userID, 10)
+		entityIDs, relErr = m.store.SearchEntityIDs(emb, userID, 10, 0.5)
 	}()
 	wg.Wait()
 
@@ -554,9 +554,13 @@ func (m *Memory) Recall(ctx context.Context, query string, userID string, opts *
 	for i, f := range facts {
 		factIDs[i] = f.ID
 	}
-	go func() { _ = m.store.BumpAccess(factIDs) }()
+	_ = m.store.BumpAccess(factIDs)
 
-	rels, err := m.store.ExpandRelations(entityIDs, userID, 2, maxRels)
+	expandLimit := maxRels
+	if expandLimit > 20 {
+		expandLimit = 20
+	}
+	rels, err := m.store.ExpandRelations(entityIDs, userID, 2, expandLimit)
 	if err != nil {
 		return nil, fmt.Errorf("expand relations: %w", err)
 	}
