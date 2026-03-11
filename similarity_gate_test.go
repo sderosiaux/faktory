@@ -42,7 +42,7 @@ func seedFactWithEmbedding(t *testing.T, mem *Memory, userID, ns, storedText, ma
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mem.store.InsertFact(userID, ns, storedText, hashFact(storedText), emb, 3); err != nil {
+	if _, err := mem.store.InsertFact(userID, ns, storedText, hashFact(storedText), emb, 3, "", 0); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -63,7 +63,7 @@ func BenchmarkSearch(b *testing.B) {
 			for i := 0; i < n; i++ {
 				text := fmt.Sprintf("fact number %d about something interesting", i)
 				emb, _ := embedder.Embed(ctx, text)
-				_, err := mem.store.InsertFact("u1", "", text, hashFact(text), emb, 3)
+				_, err := mem.store.InsertFact("u1", "", text, hashFact(text), emb, 3, "", 0)
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -97,7 +97,7 @@ func BenchmarkRecall(b *testing.B) {
 			for i := 0; i < n; i++ {
 				text := fmt.Sprintf("fact number %d about something", i)
 				emb, _ := embedder.Embed(ctx, text)
-				_, err := mem.store.InsertFact("u1", "", text, hashFact(text), emb, 3)
+				_, err := mem.store.InsertFact("u1", "", text, hashFact(text), emb, 3, "", 0)
 				if err != nil {
 					b.Fatal(err)
 				}

@@ -8,7 +8,7 @@ func (s *Store) GetFactsAt(userID, namespace string, at time.Time, limit int) ([
 	atStr := at.UTC().Format(time.RFC3339Nano)
 	rows, err := s.db.Query(`
 		SELECT id, user_id, text, hash, created_at, updated_at, access_count, importance,
-		       valid_from, COALESCE(invalid_at, '')
+		       valid_from, COALESCE(invalid_at, ''), source, confidence
 		FROM facts
 		WHERE user_id = ? AND namespace = ?
 		  AND valid_from != '' AND valid_from <= ?
@@ -24,7 +24,7 @@ func (s *Store) GetFactsAt(userID, namespace string, at time.Time, limit int) ([
 	var facts []Fact
 	for rows.Next() {
 		var f Fact
-		if err := rows.Scan(&f.ID, &f.UserID, &f.Text, &f.Hash, &f.CreatedAt, &f.UpdatedAt, &f.AccessCount, &f.Importance, &f.ValidFrom, &f.InvalidAt); err != nil {
+		if err := rows.Scan(&f.ID, &f.UserID, &f.Text, &f.Hash, &f.CreatedAt, &f.UpdatedAt, &f.AccessCount, &f.Importance, &f.ValidFrom, &f.InvalidAt, &f.Source, &f.Confidence); err != nil {
 			return nil, err
 		}
 		facts = append(facts, f)

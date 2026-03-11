@@ -5,13 +5,21 @@ import "testing"
 func TestClustering_RelatedEntitiesGrouped(t *testing.T) {
 	s := tempStore(t, 4)
 	idA, err := s.UpsertEntity("alice", "", "Spotify", "product")
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	idB, err := s.UpsertEntity("alice", "", "Music Streaming", "concept")
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	s.UpsertEntityEmbedding(idA, []float32{1, 0, 0, 0})
 	s.UpsertEntityEmbedding(idB, []float32{0.9, 0.3, 0, 0})
-	if err := s.AssignCluster(idA, "alice", "", []float32{1, 0, 0, 0}, 0.6); err != nil { t.Fatal(err) }
-	if err := s.AssignCluster(idB, "alice", "", []float32{0.9, 0.3, 0, 0}, 0.6); err != nil { t.Fatal(err) }
+	if err := s.AssignCluster(idA, "alice", "", []float32{1, 0, 0, 0}, 0.6); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AssignCluster(idB, "alice", "", []float32{0.9, 0.3, 0, 0}, 0.6); err != nil {
+		t.Fatal(err)
+	}
 	if a, b := getClusterID(t, s, idA), getClusterID(t, s, idB); a != b {
 		t.Errorf("expected same cluster, got %d and %d", a, b)
 	}
@@ -62,15 +70,27 @@ func TestClustering_GetClusterEntityIDs(t *testing.T) {
 	setClusterID(t, s, idB, 1)
 	setClusterID(t, s, idC, 2)
 	ids, err := s.GetClusterEntityIDs([]string{idA}, "alice", "")
-	if err != nil { t.Fatal(err) }
-	if len(ids) != 2 { t.Fatalf("expected 2, got %d: %v", len(ids), ids) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("expected 2, got %d: %v", len(ids), ids)
+	}
 	m := map[string]bool{}
-	for _, id := range ids { m[id] = true }
-	if !m[idA] || !m[idB] { t.Errorf("expected A and B, got %v", ids) }
+	for _, id := range ids {
+		m[id] = true
+	}
+	if !m[idA] || !m[idB] {
+		t.Errorf("expected A and B, got %v", ids)
+	}
 	ids, _ = s.GetClusterEntityIDs([]string{idC}, "alice", "")
-	if len(ids) != 1 || ids[0] != idC { t.Errorf("expected only C, got %v", ids) }
+	if len(ids) != 1 || ids[0] != idC {
+		t.Errorf("expected only C, got %v", ids)
+	}
 	ids, _ = s.GetClusterEntityIDs([]string{idA, idC}, "alice", "")
-	if len(ids) != 3 { t.Errorf("expected 3, got %d: %v", len(ids), ids) }
+	if len(ids) != 3 {
+		t.Errorf("expected 3, got %d: %v", len(ids), ids)
+	}
 }
 
 func TestClustering_SkipsZeroCluster(t *testing.T) {
@@ -96,7 +116,11 @@ func TestClustering_UserIsolation(t *testing.T) {
 }
 
 func TestCosineSimilarity(t *testing.T) {
-	for _, tc := range []struct{ name string; a, b []float32; want, tol float64 }{
+	for _, tc := range []struct {
+		name      string
+		a, b      []float32
+		want, tol float64
+	}{
 		{"identical", []float32{1, 0, 0}, []float32{1, 0, 0}, 1.0, 0.001},
 		{"orthogonal", []float32{1, 0, 0}, []float32{0, 1, 0}, 0.0, 0.001},
 		{"opposite", []float32{1, 0, 0}, []float32{-1, 0, 0}, -1.0, 0.001},

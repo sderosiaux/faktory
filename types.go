@@ -34,6 +34,8 @@ type Fact struct {
 	ValidFrom   string  `json:"valid_from,omitempty"`
 	InvalidAt   string  `json:"invalid_at,omitempty"`
 	IsSummary   bool    `json:"is_summary,omitempty"`
+	Source      string  `json:"source,omitempty"`
+	Confidence  int     `json:"confidence,omitempty"`
 }
 
 // Relation is a stored entity-relation-entity triplet.
@@ -122,7 +124,9 @@ type RecallOptions struct {
 	MaxRelations   int    `json:"max_relations,omitempty"`
 	IncludeProfile bool   `json:"include_profile,omitempty"`
 	Namespace      string `json:"namespace,omitempty"`
-	Rerank         bool   `json:"rerank,omitempty"` // LLM re-rank retrieved facts (adds 1 LLM call)
+	Rerank         bool   `json:"rerank,omitempty"`         // LLM re-rank retrieved facts (adds 1 LLM call)
+	MinConfidence  int    `json:"min_confidence,omitempty"` // filter facts below this confidence (1-5)
+	ValidAt        string `json:"valid_at,omitempty"`       // point-in-time filter (RFC3339)
 }
 
 // RecallResult combines facts and relations into a single response
@@ -174,6 +178,8 @@ type Config struct {
 	PromptFactExtraction   string // Override fact extraction system prompt
 	PromptReconciliation   string // Override reconciliation system prompt
 	PromptEntityExtraction string // Override entity extraction system prompt
+
+	EnableQualifiers bool // Enable source/confidence qualifier extraction and filtering
 }
 
 const defaultHTTPTimeout = 30 * time.Second

@@ -74,8 +74,6 @@ resolved_text: "Alice has a cat named Mochi. Alice's boyfriend Tom is allergic t
 entities: Alice (person), Mochi (other), Tom (person), Figma (organization), Python (product), Rust (product)
 relations: Alice owns Mochi, Alice partner_of Tom, Tom allergic_to cats, Tom works_at Figma, Alice uses Python, Alice uses Rust`
 
-
-
 const sessionSummaryPrompt = `Summarize the following conversation into 2-3 sentences.
 Focus on: what was discussed, key decisions made, action items, and notable information shared.
 Write from the perspective of what the user shared or asked about.
@@ -112,10 +110,12 @@ var profileSchema = json.RawMessage(`{
 
 // --- Response types ---
 
-// ExtractedFact is a single fact with its importance rating.
+// ExtractedFact is a single fact with its importance rating and optional qualifiers.
 type ExtractedFact struct {
 	Text       string `json:"text"`
 	Importance int    `json:"importance"`
+	Source     string `json:"source,omitempty"`
+	Confidence int    `json:"confidence,omitempty"`
 }
 
 type FactExtractionResult struct {
@@ -237,7 +237,6 @@ var entityExtractionSchema = json.RawMessage(`{
   "additionalProperties": false
 }`)
 
-
 // --- Rerank ---
 
 const rerankPrompt = `Given a query and a list of facts, re-rank the facts by relevance to the query.
@@ -261,3 +260,33 @@ var rerankSchema = json.RawMessage(`{
 type RerankResult struct {
 	RankedIDs []string `json:"ranked_ids"`
 }
+
+// --- Qualifier-extended variants (used when Config.EnableQualifiers is true) ---
+
+const qualifierPromptSuffix = `
+- Optionally, for each fact:
+  - "source": who stated it — "user" if directly stated, "inferred" if derived from context
+  - "confidence": how certain is this fact, 1 (guess) to 5 (explicitly stated)
+  If unsure, omit these fields.`
+
+var qualifierFactExtractionSchema = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "facts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "text": {"type": "string"},
+          "importance": {"type": "integer", "minimum": 1, "maximum": 5},
+          "source": {"type": "string"},
+          "confidence": {"type": "integer", "minimum": 1, "maximum": 5}
+        },
+        "required": ["text", "importance"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["facts"],
+  "additionalProperties": false
+}`)

@@ -90,11 +90,11 @@ func TestCountFacts(t *testing.T) {
 	}
 
 	emb, _ := fe.Embed(ctx, "fact one")
-	if _, err := mem.store.InsertFact("u1", "", "fact one", hashFact("fact one"), emb, 3); err != nil {
+	if _, err := mem.store.InsertFact("u1", "", "fact one", hashFact("fact one"), emb, 3, "", 0); err != nil {
 		t.Fatal(err)
 	}
 	emb, _ = fe.Embed(ctx, "fact two")
-	if _, err := mem.store.InsertFact("u1", "", "fact two", hashFact("fact two"), emb, 3); err != nil {
+	if _, err := mem.store.InsertFact("u1", "", "fact two", hashFact("fact two"), emb, 3, "", 0); err != nil {
 		t.Fatal(err)
 	}
 

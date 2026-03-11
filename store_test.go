@@ -32,7 +32,7 @@ func TestInsertAndGetFact(t *testing.T) {
 	s := tempStore(t, 4)
 
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	id, err := s.InsertFact("alice", "", "likes pizza", "hash1", emb, 3)
+	id, err := s.InsertFact("alice", "", "likes pizza", "hash1", emb, 3, "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,9 +56,9 @@ func TestGetAllFacts(t *testing.T) {
 	s := tempStore(t, 4)
 
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	s.InsertFact("alice", "", "fact 1", "h1", emb, 3)
-	s.InsertFact("alice", "", "fact 2", "h2", emb, 3)
-	s.InsertFact("bob", "", "bob fact", "h3", emb, 3)
+	s.InsertFact("alice", "", "fact 1", "h1", emb, 3, "", 0)
+	s.InsertFact("alice", "", "fact 2", "h2", emb, 3, "", 0)
+	s.InsertFact("bob", "", "bob fact", "h3", emb, 3, "", 0)
 
 	facts, err := s.GetAllFacts("alice", "", 100)
 	if err != nil {
@@ -78,7 +78,7 @@ func TestDeleteFact(t *testing.T) {
 	s := tempStore(t, 4)
 
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	id, _ := s.InsertFact("alice", "", "to delete", "hd", emb, 3)
+	id, _ := s.InsertFact("alice", "", "to delete", "hd", emb, 3, "", 0)
 
 	if err := s.DeleteFact(id); err != nil {
 		t.Fatal(err)
@@ -97,7 +97,7 @@ func TestUpdateFact(t *testing.T) {
 	s := tempStore(t, 4)
 
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	id, _ := s.InsertFact("alice", "", "lives in Paris", "hp", emb, 3)
+	id, _ := s.InsertFact("alice", "", "lives in Paris", "hp", emb, 3, "", 0)
 
 	newEmb := []float32{0.5, 0.6, 0.7, 0.8}
 	newID, err := s.UpdateFact(id, "lives in Lyon", "hl", newEmb)
@@ -120,7 +120,7 @@ func TestHashDedup(t *testing.T) {
 	s := tempStore(t, 4)
 
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	s.InsertFact("alice", "", "likes pizza", "hash_pizza", emb, 3)
+	s.InsertFact("alice", "", "likes pizza", "hash_pizza", emb, 3, "", 0)
 
 	exists, err := s.FactExistsByHash("alice", "", "hash_pizza")
 	if err != nil {
@@ -145,9 +145,9 @@ func TestHashDedup(t *testing.T) {
 func TestSearchFacts(t *testing.T) {
 	s := tempStore(t, 4)
 
-	s.InsertFact("alice", "", "likes pizza", "h1", []float32{1, 0, 0, 0}, 3)
-	s.InsertFact("alice", "", "lives in Paris", "h2", []float32{0, 1, 0, 0}, 3)
-	s.InsertFact("bob", "", "bob stuff", "h3", []float32{1, 0, 0, 0}, 3)
+	s.InsertFact("alice", "", "likes pizza", "h1", []float32{1, 0, 0, 0}, 3, "", 0)
+	s.InsertFact("alice", "", "lives in Paris", "h2", []float32{0, 1, 0, 0}, 3, "", 0)
+	s.InsertFact("bob", "", "bob stuff", "h3", []float32{1, 0, 0, 0}, 3, "", 0)
 
 	// Search with a vector close to "likes pizza"
 	results, err := s.SearchFacts([]float32{0.9, 0.1, 0, 0}, "alice", "", 5)
@@ -168,10 +168,10 @@ func TestSearchFactsUserIsolation(t *testing.T) {
 
 	// Insert many bob facts with identical vectors to crowd out KNN results
 	for i := 0; i < 30; i++ {
-		s.InsertFact("bob", "", fmt.Sprintf("bob fact %d", i), fmt.Sprintf("bob_%d", i), []float32{1, 0, 0, 0}, 3)
+		s.InsertFact("bob", "", fmt.Sprintf("bob fact %d", i), fmt.Sprintf("bob_%d", i), []float32{1, 0, 0, 0}, 3, "", 0)
 	}
 	// Alice has one fact with the same vector direction
-	s.InsertFact("alice", "", "alice fact", "alice_1", []float32{1, 0, 0, 0}, 3)
+	s.InsertFact("alice", "", "alice fact", "alice_1", []float32{1, 0, 0, 0}, 3, "", 0)
 
 	// Search for alice — should find her fact despite bob dominating the KNN
 	results, err := s.SearchFacts([]float32{1, 0, 0, 0}, "alice", "", 5)
@@ -196,9 +196,9 @@ func TestDeleteAllForUser(t *testing.T) {
 	s := tempStore(t, 4)
 
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	s.InsertFact("alice", "", "fact 1", "h1", emb, 3)
-	s.InsertFact("alice", "", "fact 2", "h2", emb, 3)
-	s.InsertFact("bob", "", "bob fact", "h3", emb, 3)
+	s.InsertFact("alice", "", "fact 1", "h1", emb, 3, "", 0)
+	s.InsertFact("alice", "", "fact 2", "h2", emb, 3, "", 0)
+	s.InsertFact("bob", "", "bob fact", "h3", emb, 3, "", 0)
 
 	s.UpsertEntity("alice", "", "Alice", "person")
 	s.UpsertEntity("alice", "", "Acme", "organization")
@@ -308,8 +308,8 @@ func TestCleanupStaleRelations_SQL(t *testing.T) {
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
 
 	// Insert two facts mentioning Alice and Acme
-	id1, _ := s.InsertFact("alice", "", "Alice works at Acme", "h1", emb, 3)
-	s.InsertFact("alice", "", "Alice lives in Paris", "h2", emb, 3)
+	id1, _ := s.InsertFact("alice", "", "Alice works at Acme", "h1", emb, 3, "", 0)
+	s.InsertFact("alice", "", "Alice lives in Paris", "h2", emb, 3, "", 0)
 
 	// Create entities and a relation
 	aliceID, _ := s.UpsertEntity("alice", "", "Alice", "person")
@@ -348,7 +348,7 @@ func TestCleanupStaleRelations_SQL(t *testing.T) {
 	}
 
 	// No-op when entity still appears in another fact
-	s.InsertFact("alice", "", "Alice met Bob", "h3", emb, 3)
+	s.InsertFact("alice", "", "Alice met Bob", "h3", emb, 3, "", 0)
 	bobID, _ := s.UpsertEntity("alice", "", "Bob", "person")
 	s.UpsertRelation("alice", "", aliceID, "met", bobID)
 

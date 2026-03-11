@@ -72,7 +72,7 @@ func TestAdd_ReconciliationHallucinatedID(t *testing.T) {
 	// forcing the candidate through the reconciliation path.
 	fe := &faktorytest.FakeEmbedder{Dim: 8}
 	emb, _ := fe.Embed(context.Background(), "likes Go")
-	if _, err := mem.store.InsertFact("u1", "", "likes Go old", hashFact("likes Go old"), emb, 3); err != nil {
+	if _, err := mem.store.InsertFact("u1", "", "likes Go old", hashFact("likes Go old"), emb, 3, "", 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -106,7 +106,7 @@ func TestAdd_ReconciliationInvalidEvent(t *testing.T) {
 	// Pre-populate with a similar fact so the candidate goes through reconciliation.
 	fe := &faktorytest.FakeEmbedder{Dim: 8}
 	emb, _ := fe.Embed(context.Background(), "likes Rust")
-	if _, err := mem.store.InsertFact("u1", "", "likes Rust old", hashFact("likes Rust old"), emb, 3); err != nil {
+	if _, err := mem.store.InsertFact("u1", "", "likes Rust old", hashFact("likes Rust old"), emb, 3, "", 0); err != nil {
 		t.Fatal(err)
 	}
 

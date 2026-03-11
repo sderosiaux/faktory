@@ -109,9 +109,9 @@ func TestBM25_ExactKeywordMatch(t *testing.T) {
 	skipIfNoFTS5(t)
 	s := tempStore(t, 4)
 
-	s.InsertFact("alice", "", "Alice loves pepperoni pizza", "h1", []float32{1, 0, 0, 0}, 3)
-	s.InsertFact("alice", "", "Bob prefers sushi", "h2", []float32{0, 1, 0, 0}, 3)
-	s.InsertFact("alice", "", "Alice eats pasta every Friday", "h3", []float32{0, 0, 1, 0}, 3)
+	s.InsertFact("alice", "", "Alice loves pepperoni pizza", "h1", []float32{1, 0, 0, 0}, 3, "", 0)
+	s.InsertFact("alice", "", "Bob prefers sushi", "h2", []float32{0, 1, 0, 0}, 3, "", 0)
+	s.InsertFact("alice", "", "Alice eats pasta every Friday", "h3", []float32{0, 0, 1, 0}, 3, "", 0)
 
 	results, err := s.SearchFactsBM25("pepperoni", "alice", "", 10)
 	if err != nil {
@@ -132,7 +132,7 @@ func TestBM25_FTSTriggersSync(t *testing.T) {
 	skipIfNoFTS5(t)
 	s := tempStore(t, 4)
 
-	id, _ := s.InsertFact("alice", "", "original keyword xylophone", "h1", []float32{1, 0, 0, 0}, 3)
+	id, _ := s.InsertFact("alice", "", "original keyword xylophone", "h1", []float32{1, 0, 0, 0}, 3, "", 0)
 
 	results, _ := s.SearchFactsBM25("xylophone", "alice", "", 10)
 	if len(results) != 1 {
@@ -167,7 +167,7 @@ func TestBM25_RecallIncludesBM25(t *testing.T) {
 	ctx := context.Background()
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
 
-	m.store.InsertFact("alice", "", "Alice uses faktory library", "h1", emb, 3)
+	m.store.InsertFact("alice", "", "Alice uses faktory library", "h1", emb, 3, "", 0)
 
 	result, err := m.Recall(ctx, "faktory", "alice", &RecallOptions{MaxFacts: 10})
 	if err != nil {
@@ -182,7 +182,7 @@ func TestBM25_MalformedQuery(t *testing.T) {
 	skipIfNoFTS5(t)
 	s := tempStore(t, 4)
 
-	s.InsertFact("alice", "", "some fact text", "h1", []float32{1, 0, 0, 0}, 3)
+	s.InsertFact("alice", "", "some fact text", "h1", []float32{1, 0, 0, 0}, 3, "", 0)
 
 	malformed := []string{"---", "OR AND NOT", `"unclosed`, "()", "***"}
 	for _, q := range malformed {
@@ -198,8 +198,8 @@ func TestBM25_NamespaceIsolation(t *testing.T) {
 	skipIfNoFTS5(t)
 	s := tempStore(t, 4)
 
-	s.InsertFact("alice", "work", "project deadline approaching", "h1", []float32{1, 0, 0, 0}, 3)
-	s.InsertFact("alice", "personal", "birthday party planning", "h2", []float32{0, 1, 0, 0}, 3)
+	s.InsertFact("alice", "work", "project deadline approaching", "h1", []float32{1, 0, 0, 0}, 3, "", 0)
+	s.InsertFact("alice", "personal", "birthday party planning", "h2", []float32{0, 1, 0, 0}, 3, "", 0)
 
 	results, _ := s.SearchFactsBM25("deadline", "alice", "work", 10)
 	if len(results) != 1 {
@@ -220,8 +220,8 @@ func TestBM25_SearchIntegration(t *testing.T) {
 	ctx := context.Background()
 
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	m.store.InsertFact("alice", "", "Alice speaks fluent Esperanto", "h1", emb, 3)
-	m.store.InsertFact("alice", "", "Alice likes pizza", "h2", emb, 3)
+	m.store.InsertFact("alice", "", "Alice speaks fluent Esperanto", "h1", emb, 3, "", 0)
+	m.store.InsertFact("alice", "", "Alice likes pizza", "h2", emb, 3, "", 0)
 
 	results, err := m.Search(ctx, "Esperanto", "alice", 10)
 	if err != nil {

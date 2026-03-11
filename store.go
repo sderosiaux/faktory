@@ -28,7 +28,9 @@ CREATE TABLE IF NOT EXISTS facts (
     updated_at      TEXT NOT NULL,
     access_count    INTEGER NOT NULL DEFAULT 0,
     last_accessed_at TEXT,
-    is_summary      INTEGER NOT NULL DEFAULT 0
+    is_summary      INTEGER NOT NULL DEFAULT 0,
+    source          TEXT NOT NULL DEFAULT '',
+    confidence      INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS entities (
@@ -132,6 +134,10 @@ func OpenStore(dbPath string, dimension int) (*Store, error) {
 	// Additive migration: is_summary column (safe no-op on fresh DBs)
 	db.Exec("ALTER TABLE facts ADD COLUMN is_summary INTEGER NOT NULL DEFAULT 0")
 
+	// Additive migration: qualifier columns (safe no-op on fresh DBs)
+	db.Exec("ALTER TABLE facts ADD COLUMN source TEXT NOT NULL DEFAULT ''")
+	db.Exec("ALTER TABLE facts ADD COLUMN confidence INTEGER NOT NULL DEFAULT 0")
+
 	// Create vec0 virtual tables
 	for _, tbl := range []string{"fact_embeddings", "entity_embeddings"} {
 		vecSQL := fmt.Sprintf(`CREATE VIRTUAL TABLE IF NOT EXISTS %s USING vec0(id TEXT PRIMARY KEY, embedding float[%d] distance_metric=cosine)`, tbl, dimension)
@@ -186,9 +192,12 @@ func newID() string {
 
 // --- Facts ---
 
-func (s *Store) InsertFact(userID, namespace, text, hash string, embedding []float32, importance int) (string, error) {
+func (s *Store) InsertFact(userID, namespace, text, hash string, embedding []float32, importance int, source string, confidence int) (string, error) {
 	if importance <= 0 || importance > 5 {
 		importance = 3
+	}
+	if confidence < 0 || confidence > 5 {
+		confidence = 0
 	}
 	id := newID()
 	ts := now()
@@ -198,8 +207,8 @@ func (s *Store) InsertFact(userID, namespace, text, hash string, embedding []flo
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec("INSERT INTO facts (id, user_id, namespace, text, hash, importance, created_at, updated_at, valid_from) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		id, userID, namespace, text, hash, importance, ts, ts, ts); err != nil {
+	if _, err := tx.Exec("INSERT INTO facts (id, user_id, namespace, text, hash, importance, created_at, updated_at, valid_from, source, confidence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		id, userID, namespace, text, hash, importance, ts, ts, ts, source, confidence); err != nil {
 		return "", fmt.Errorf("insert fact: %w", err)
 	}
 
@@ -228,9 +237,9 @@ func (s *Store) UpdateFact(id, text, hash string, embedding []float32) (string, 
 	defer tx.Rollback()
 
 	// Capture current state for history
-	var oldText, oldHash, userID, namespace string
-	var importance int
-	if err := tx.QueryRow("SELECT user_id, namespace, text, hash, importance FROM facts WHERE id = ?", id).Scan(&userID, &namespace, &oldText, &oldHash, &importance); err != nil {
+	var oldText, oldHash, userID, namespace, oldSource string
+	var importance, oldConfidence int
+	if err := tx.QueryRow("SELECT user_id, namespace, text, hash, importance, source, confidence FROM facts WHERE id = ?", id).Scan(&userID, &namespace, &oldText, &oldHash, &importance, &oldSource, &oldConfidence); err != nil {
 		return "", fmt.Errorf("read current fact: %w", err)
 	}
 
@@ -245,10 +254,10 @@ func (s *Store) UpdateFact(id, text, hash string, embedding []float32) (string, 
 		return "", fmt.Errorf("delete old embedding: %w", err)
 	}
 
-	// Create new version
+	// Create new version (carry forward source/confidence from old fact)
 	vid := newID()
-	if _, err := tx.Exec("INSERT INTO facts (id, user_id, namespace, text, hash, importance, created_at, updated_at, valid_from) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		vid, userID, namespace, text, hash, importance, ts, ts, ts); err != nil {
+	if _, err := tx.Exec("INSERT INTO facts (id, user_id, namespace, text, hash, importance, created_at, updated_at, valid_from, source, confidence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		vid, userID, namespace, text, hash, importance, ts, ts, ts, oldSource, oldConfidence); err != nil {
 		return "", fmt.Errorf("insert new version: %w", err)
 	}
 
@@ -302,8 +311,8 @@ func (s *Store) DeleteFact(id string) error {
 
 func (s *Store) GetFact(id string) (*Fact, error) {
 	var f Fact
-	err := s.db.QueryRow("SELECT id, user_id, text, hash, created_at, updated_at, access_count, importance, COALESCE(valid_from,''), COALESCE(invalid_at,'') FROM facts WHERE id = ? AND invalid_at IS NULL", id).
-		Scan(&f.ID, &f.UserID, &f.Text, &f.Hash, &f.CreatedAt, &f.UpdatedAt, &f.AccessCount, &f.Importance, &f.ValidFrom, &f.InvalidAt)
+	err := s.db.QueryRow("SELECT id, user_id, text, hash, created_at, updated_at, access_count, importance, COALESCE(valid_from,''), COALESCE(invalid_at,''), source, confidence FROM facts WHERE id = ? AND invalid_at IS NULL", id).
+		Scan(&f.ID, &f.UserID, &f.Text, &f.Hash, &f.CreatedAt, &f.UpdatedAt, &f.AccessCount, &f.Importance, &f.ValidFrom, &f.InvalidAt, &f.Source, &f.Confidence)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -314,9 +323,12 @@ func (s *Store) GetFact(id string) (*Fact, error) {
 }
 
 // ReinsertFact restores a soft-deleted fact by clearing invalid_at, or inserts fresh.
-func (s *Store) ReinsertFact(id, userID, text, hash string, embedding []float32, importance int) error {
+func (s *Store) ReinsertFact(id, userID, text, hash string, embedding []float32, importance int, source string, confidence int) error {
 	if importance <= 0 || importance > 5 {
 		importance = 3
+	}
+	if confidence < 0 || confidence > 5 {
+		confidence = 0
 	}
 	ts := now()
 	tx, err := s.db.Begin()
@@ -333,13 +345,13 @@ func (s *Store) ReinsertFact(id, userID, text, hash string, embedding []float32,
 
 	if count > 0 {
 		// Row exists (soft-deleted) — restore it
-		if _, err := tx.Exec("UPDATE facts SET text = ?, hash = ?, importance = ?, updated_at = ?, invalid_at = NULL, valid_from = ? WHERE id = ?",
-			text, hash, importance, ts, ts, id); err != nil {
+		if _, err := tx.Exec("UPDATE facts SET text = ?, hash = ?, importance = ?, updated_at = ?, invalid_at = NULL, valid_from = ?, source = ?, confidence = ? WHERE id = ?",
+			text, hash, importance, ts, ts, source, confidence, id); err != nil {
 			return fmt.Errorf("restore fact: %w", err)
 		}
 	} else {
-		if _, err := tx.Exec("INSERT INTO facts (id, user_id, text, hash, importance, created_at, updated_at, valid_from) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-			id, userID, text, hash, importance, ts, ts, ts); err != nil {
+		if _, err := tx.Exec("INSERT INTO facts (id, user_id, text, hash, importance, created_at, updated_at, valid_from, source, confidence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			id, userID, text, hash, importance, ts, ts, ts, source, confidence); err != nil {
 			return fmt.Errorf("reinsert fact: %w", err)
 		}
 	}
@@ -430,7 +442,7 @@ func (s *Store) CountFacts(userID, namespace string) (int, error) {
 }
 
 func (s *Store) GetAllFacts(userID, namespace string, limit int) ([]Fact, error) {
-	rows, err := s.db.Query("SELECT id, user_id, text, hash, created_at, updated_at, access_count, importance FROM facts WHERE user_id = ? AND namespace = ? AND invalid_at IS NULL AND is_summary = 0 ORDER BY created_at DESC LIMIT ?", userID, namespace, limit)
+	rows, err := s.db.Query("SELECT id, user_id, text, hash, created_at, updated_at, access_count, importance, source, confidence FROM facts WHERE user_id = ? AND namespace = ? AND invalid_at IS NULL AND is_summary = 0 ORDER BY created_at DESC LIMIT ?", userID, namespace, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -439,7 +451,7 @@ func (s *Store) GetAllFacts(userID, namespace string, limit int) ([]Fact, error)
 	var facts []Fact
 	for rows.Next() {
 		var f Fact
-		if err := rows.Scan(&f.ID, &f.UserID, &f.Text, &f.Hash, &f.CreatedAt, &f.UpdatedAt, &f.AccessCount, &f.Importance); err != nil {
+		if err := rows.Scan(&f.ID, &f.UserID, &f.Text, &f.Hash, &f.CreatedAt, &f.UpdatedAt, &f.AccessCount, &f.Importance, &f.Source, &f.Confidence); err != nil {
 			return nil, err
 		}
 		facts = append(facts, f)
@@ -461,7 +473,7 @@ func (s *Store) SearchFacts(queryEmbedding []float32, userID, namespace string, 
 	}
 
 	rows, err := s.db.Query(`
-		SELECT f.id, f.user_id, f.text, f.hash, f.created_at, f.updated_at, f.access_count, f.importance, e.distance
+		SELECT f.id, f.user_id, f.text, f.hash, f.created_at, f.updated_at, f.access_count, f.importance, f.source, f.confidence, e.distance
 		FROM fact_embeddings e
 		JOIN facts f ON f.id = e.id
 		WHERE e.embedding MATCH ?
@@ -482,7 +494,7 @@ func (s *Store) SearchFacts(queryEmbedding []float32, userID, namespace string, 
 	for rows.Next() {
 		var f Fact
 		var dist float64
-		if err := rows.Scan(&f.ID, &f.UserID, &f.Text, &f.Hash, &f.CreatedAt, &f.UpdatedAt, &f.AccessCount, &f.Importance, &dist); err != nil {
+		if err := rows.Scan(&f.ID, &f.UserID, &f.Text, &f.Hash, &f.CreatedAt, &f.UpdatedAt, &f.AccessCount, &f.Importance, &f.Source, &f.Confidence, &dist); err != nil {
 			return nil, err
 		}
 		f.Score = 1 - dist // cosine distance → similarity
@@ -677,314 +689,4 @@ func (s *Store) ConversationExists(userID, namespace, contentHash string) (bool,
 func (s *Store) MarkConversationProcessed(userID, namespace, contentHash string) error {
 	_, err := s.db.Exec("INSERT OR IGNORE INTO processed_conversations (user_id, namespace, content_hash, created_at) VALUES (?, ?, ?, ?)", userID, namespace, contentHash, now())
 	return err
-}
-
-// --- Entities ---
-
-func (s *Store) GetAllEntities(userID, namespace string, limit int) ([]Entity, error) {
-	rows, err := s.db.Query("SELECT id, name, type FROM entities WHERE user_id = ? AND namespace = ? ORDER BY created_at DESC LIMIT ?", userID, namespace, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var entities []Entity
-	for rows.Next() {
-		var e Entity
-		if err := rows.Scan(&e.ID, &e.Name, &e.Type); err != nil {
-			return nil, err
-		}
-		entities = append(entities, e)
-	}
-	return entities, rows.Err()
-}
-
-func (s *Store) UpsertEntity(userID, namespace, name, entityType string) (string, error) {
-	id := newID()
-	ts := now()
-	_, err := s.db.Exec(`INSERT INTO entities (id, user_id, namespace, name, type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(user_id, namespace, name, type) DO UPDATE SET updated_at = ?`,
-		id, userID, namespace, name, entityType, ts, ts, ts)
-	if err != nil {
-		return "", fmt.Errorf("upsert entity: %w", err)
-	}
-
-	// Return the actual ID (might be existing)
-	var actualID string
-	err = s.db.QueryRow("SELECT id FROM entities WHERE user_id = ? AND namespace = ? AND name = ? AND type = ?", userID, namespace, name, entityType).Scan(&actualID)
-	return actualID, err
-}
-
-func (s *Store) UpsertEntityEmbedding(entityID string, embedding []float32) error {
-	embJSON, err := json.Marshal(embedding)
-	if err != nil {
-		return err
-	}
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	if _, err := tx.Exec("DELETE FROM entity_embeddings WHERE id = ?", entityID); err != nil {
-		return fmt.Errorf("delete old entity embedding: %w", err)
-	}
-	if _, err := tx.Exec("INSERT INTO entity_embeddings (id, embedding) VALUES (?, ?)", entityID, string(embJSON)); err != nil {
-		return fmt.Errorf("insert entity embedding: %w", err)
-	}
-	return tx.Commit()
-}
-
-// --- Relations ---
-
-func (s *Store) UpsertRelation(userID, namespace, sourceID, relation, targetID string) error {
-	id := newID()
-	ts := now()
-	_, err := s.db.Exec(`INSERT INTO relations (id, user_id, namespace, source_id, relation, target_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(user_id, namespace, source_id, relation, target_id) DO UPDATE SET updated_at = ?`,
-		id, userID, namespace, sourceID, relation, targetID, ts, ts, ts)
-	return err
-}
-
-func (s *Store) GetAllRelations(userID, namespace string, limit int) ([]Relation, error) {
-	rows, err := s.db.Query(`
-		SELECT r.id, r.relation,
-		       s.name, s.type,
-		       t.name, t.type
-		FROM relations r
-		JOIN entities s ON s.id = r.source_id
-		JOIN entities t ON t.id = r.target_id
-		WHERE r.user_id = ? AND r.namespace = ?
-		ORDER BY r.created_at DESC
-		LIMIT ?
-	`, userID, namespace, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var rels []Relation
-	for rows.Next() {
-		var r Relation
-		if err := rows.Scan(&r.ID, &r.Relation, &r.Source, &r.SourceType, &r.Target, &r.TargetType); err != nil {
-			return nil, err
-		}
-		rels = append(rels, r)
-	}
-	return rels, rows.Err()
-}
-
-// ExpandRelations performs BFS from seed entity IDs, following relation edges
-// up to maxDepth hops. Returns deduplicated relations with hop distance.
-func (s *Store) ExpandRelations(seedIDs []string, userID, namespace string, maxDepth int, limit int) ([]Relation, error) {
-	if len(seedIDs) == 0 {
-		return nil, nil
-	}
-
-	seen := make(map[string]bool)     // relation IDs already collected
-	frontier := make(map[string]bool) // entity IDs to explore
-	for _, id := range seedIDs {
-		frontier[id] = true
-	}
-
-	var result []Relation
-
-	for depth := 0; depth < maxDepth && len(frontier) > 0 && len(result) < limit; depth++ {
-		ids := make([]string, 0, len(frontier))
-		for id := range frontier {
-			ids = append(ids, id)
-		}
-
-		placeholders := make([]string, len(ids))
-		args := make([]any, 0, len(ids)*2+3)
-		args = append(args, userID, namespace)
-		for i, id := range ids {
-			placeholders[i] = "?"
-			args = append(args, id)
-		}
-		inClause := strings.Join(placeholders, ",")
-		for _, id := range ids {
-			args = append(args, id)
-		}
-		args = append(args, limit-len(result))
-
-		q := fmt.Sprintf(`
-			SELECT r.id, r.relation,
-			       s.id, s.name, s.type,
-			       t.id, t.name, t.type
-			FROM relations r
-			JOIN entities s ON s.id = r.source_id
-			JOIN entities t ON t.id = r.target_id
-			WHERE r.user_id = ? AND r.namespace = ?
-			  AND (r.source_id IN (%s) OR r.target_id IN (%s))
-			LIMIT ?
-		`, inClause, inClause)
-
-		rows, err := s.db.Query(q, args...)
-		if err != nil {
-			return nil, err
-		}
-
-		nextFrontier := make(map[string]bool)
-		err = func() error {
-			defer rows.Close()
-			for rows.Next() {
-				var r Relation
-				var srcID, tgtID string
-				if err := rows.Scan(&r.ID, &r.Relation, &srcID, &r.Source, &r.SourceType, &tgtID, &r.Target, &r.TargetType); err != nil {
-					return err
-				}
-				if seen[r.ID] {
-					continue
-				}
-				seen[r.ID] = true
-				result = append(result, r)
-				if !frontier[srcID] {
-					nextFrontier[srcID] = true
-				}
-				if !frontier[tgtID] {
-					nextFrontier[tgtID] = true
-				}
-			}
-			return rows.Err()
-		}()
-		if err != nil {
-			return nil, err
-		}
-
-		frontier = nextFrontier
-	}
-
-	return result, nil
-}
-
-// SearchEntityIDs returns entity IDs matching the query embedding via KNN.
-// Only entities with cosine similarity >= minSimilarity are returned.
-func (s *Store) SearchEntityIDs(queryEmbedding []float32, userID, namespace string, limit int, minSimilarity float64) ([]string, error) {
-	embJSON, err := json.Marshal(queryEmbedding)
-	if err != nil {
-		return nil, err
-	}
-	kFetch := limit * 20
-	if kFetch > 200 {
-		kFetch = 200
-	}
-
-	rows, err := s.db.Query(`
-		SELECT e.id, ee.distance
-		FROM entity_embeddings ee
-		JOIN entities e ON e.id = ee.id
-		WHERE ee.embedding MATCH ?
-		  AND k = ?
-		  AND e.user_id = ?
-		  AND e.namespace = ?
-	`, string(embJSON), kFetch, userID, namespace)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var ids []string
-	for rows.Next() {
-		var id string
-		var dist float64
-		if err := rows.Scan(&id, &dist); err != nil {
-			return nil, err
-		}
-		if 1-dist < minSimilarity {
-			continue
-		}
-		ids = append(ids, id)
-		if len(ids) >= limit {
-			break
-		}
-	}
-	return ids, rows.Err()
-}
-
-func (s *Store) SearchRelations(queryEmbedding []float32, userID, namespace string, limit int) ([]Relation, error) {
-	embJSON, err := json.Marshal(queryEmbedding)
-	if err != nil {
-		return nil, err
-	}
-
-	// KNN search entity_embeddings, over-fetch then filter by user_id via JOIN
-	kFetch := limit * 20
-	if kFetch > 200 {
-		kFetch = 200
-	}
-
-	// Find entity IDs matching the query embedding
-	entityRows, err := s.db.Query(`
-		SELECT e.id
-		FROM entity_embeddings ee
-		JOIN entities e ON e.id = ee.id
-		WHERE ee.embedding MATCH ?
-		  AND k = ?
-		  AND e.user_id = ?
-		  AND e.namespace = ?
-	`, string(embJSON), kFetch, userID, namespace)
-	if err != nil {
-		return nil, err
-	}
-	defer entityRows.Close()
-	var entityIDs []string
-	for entityRows.Next() {
-		var id string
-		if err := entityRows.Scan(&id); err != nil {
-			return nil, err
-		}
-		entityIDs = append(entityIDs, id)
-	}
-	if err := entityRows.Err(); err != nil {
-		return nil, err
-	}
-
-	if len(entityIDs) == 0 {
-		return []Relation{}, nil
-	}
-
-	// Build IN clause for matched entity IDs
-	placeholders := make([]string, len(entityIDs))
-	args := make([]any, 0, len(entityIDs)*2+3)
-	args = append(args, userID, namespace)
-	for i, id := range entityIDs {
-		placeholders[i] = "?"
-		args = append(args, id)
-	}
-	inClause := strings.Join(placeholders, ",")
-
-	// Duplicate the entity ID args for the second IN clause (target_id)
-	for _, id := range entityIDs {
-		args = append(args, id)
-	}
-	args = append(args, limit)
-
-	q := fmt.Sprintf(`
-		SELECT r.id, r.relation,
-		       s.name, s.type,
-		       t.name, t.type
-		FROM relations r
-		JOIN entities s ON s.id = r.source_id
-		JOIN entities t ON t.id = r.target_id
-		WHERE r.user_id = ? AND r.namespace = ?
-		  AND (r.source_id IN (%s) OR r.target_id IN (%s))
-		ORDER BY r.created_at DESC
-		LIMIT ?
-	`, inClause, inClause)
-
-	rows, err := s.db.Query(q, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var rels []Relation
-	for rows.Next() {
-		var r Relation
-		if err := rows.Scan(&r.ID, &r.Relation, &r.Source, &r.SourceType, &r.Target, &r.TargetType); err != nil {
-			return nil, err
-		}
-		rels = append(rels, r)
-	}
-	return rels, rows.Err()
 }

@@ -13,6 +13,8 @@ type candidateFact struct {
 	embedding  []float32
 	similar    []Fact
 	importance int
+	source     string
+	confidence int
 }
 
 // maxReconcileChunk is the maximum number of candidate facts sent in a single reconciliation LLM call.
@@ -134,7 +136,7 @@ func (m *Memory) reconcileChunk(ctx context.Context, candidates []candidateFact,
 					return nil, fmt.Errorf("embed new fact: %w", err)
 				}
 			}
-			id, err := m.store.InsertFact(userID, namespace, action.Text, hashFact(action.Text), emb, 3)
+			id, err := m.store.InsertFact(userID, namespace, action.Text, hashFact(action.Text), emb, 3, "", 0)
 			if err != nil {
 				return nil, fmt.Errorf("insert fact: %w", err)
 			}

@@ -31,7 +31,7 @@ func seedSimilarFact(t *testing.T, mem *Memory, userID, storedText, matchText st
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mem.store.InsertFact(userID, "", storedText, hashFact(storedText), emb, 3); err != nil {
+	if _, err := mem.store.InsertFact(userID, "", storedText, hashFact(storedText), emb, 3, "", 0); err != nil {
 		t.Fatal(err)
 	}
 }

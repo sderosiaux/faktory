@@ -11,7 +11,7 @@ import (
 func TestBiTemporal_InsertSetsValidFrom(t *testing.T) {
 	s := tempStore(t, 4)
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	id, err := s.InsertFact("alice", "", "likes pizza", "h1", emb, 3)
+	id, err := s.InsertFact("alice", "", "likes pizza", "h1", emb, 3, "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +30,7 @@ func TestBiTemporal_InsertSetsValidFrom(t *testing.T) {
 func TestBiTemporal_UpdateCreatesNewVersion(t *testing.T) {
 	s := tempStore(t, 4)
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	oldID, _ := s.InsertFact("alice", "", "lives in Paris", "hp", emb, 3)
+	oldID, _ := s.InsertFact("alice", "", "lives in Paris", "hp", emb, 3, "", 0)
 
 	newEmb := []float32{0.5, 0.6, 0.7, 0.8}
 	newID, err := s.UpdateFact(oldID, "lives in Lyon", "hl", newEmb)
@@ -63,7 +63,7 @@ func TestBiTemporal_UpdateCreatesNewVersion(t *testing.T) {
 func TestBiTemporal_UpdatePreservesUserAndNamespace(t *testing.T) {
 	s := tempStore(t, 4)
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	oldID, _ := s.InsertFact("alice", "work", "likes pizza", "h1", emb, 3)
+	oldID, _ := s.InsertFact("alice", "work", "likes pizza", "h1", emb, 3, "", 0)
 
 	newID, err := s.UpdateFact(oldID, "likes pasta", "h2", emb)
 	if err != nil {
@@ -78,7 +78,7 @@ func TestBiTemporal_UpdatePreservesUserAndNamespace(t *testing.T) {
 func TestBiTemporal_DeleteSoftDeletes(t *testing.T) {
 	s := tempStore(t, 4)
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	id, _ := s.InsertFact("alice", "", "likes pizza", "h1", emb, 3)
+	id, _ := s.InsertFact("alice", "", "likes pizza", "h1", emb, 3, "", 0)
 
 	if err := s.DeleteFact(id); err != nil {
 		t.Fatal(err)
@@ -101,7 +101,7 @@ func TestBiTemporal_DeleteSoftDeletes(t *testing.T) {
 func TestBiTemporal_DeleteRemovesEmbedding(t *testing.T) {
 	s := tempStore(t, 4)
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	id, _ := s.InsertFact("alice", "", "likes pizza", "h1", emb, 3)
+	id, _ := s.InsertFact("alice", "", "likes pizza", "h1", emb, 3, "", 0)
 
 	s.DeleteFact(id)
 
@@ -115,8 +115,8 @@ func TestBiTemporal_DeleteRemovesEmbedding(t *testing.T) {
 
 func TestBiTemporal_SoftDeletedExcludedFromSearch(t *testing.T) {
 	s := tempStore(t, 4)
-	s.InsertFact("alice", "", "likes pizza", "h1", []float32{1, 0, 0, 0}, 3)
-	id2, _ := s.InsertFact("alice", "", "lives in Paris", "h2", []float32{0, 1, 0, 0}, 3)
+	s.InsertFact("alice", "", "likes pizza", "h1", []float32{1, 0, 0, 0}, 3, "", 0)
+	id2, _ := s.InsertFact("alice", "", "lives in Paris", "h2", []float32{0, 1, 0, 0}, 3, "", 0)
 
 	s.DeleteFact(id2)
 
@@ -134,8 +134,8 @@ func TestBiTemporal_SoftDeletedExcludedFromSearch(t *testing.T) {
 func TestBiTemporal_SoftDeletedExcludedFromCount(t *testing.T) {
 	s := tempStore(t, 4)
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	s.InsertFact("alice", "", "fact 1", "h1", emb, 3)
-	id2, _ := s.InsertFact("alice", "", "fact 2", "h2", emb, 3)
+	s.InsertFact("alice", "", "fact 1", "h1", emb, 3, "", 0)
+	id2, _ := s.InsertFact("alice", "", "fact 2", "h2", emb, 3, "", 0)
 
 	s.DeleteFact(id2)
 
@@ -151,7 +151,7 @@ func TestBiTemporal_SoftDeletedExcludedFromCount(t *testing.T) {
 func TestBiTemporal_SoftDeletedExcludedFromHashDedup(t *testing.T) {
 	s := tempStore(t, 4)
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	id, _ := s.InsertFact("alice", "", "likes pizza", "hash_pizza", emb, 3)
+	id, _ := s.InsertFact("alice", "", "likes pizza", "hash_pizza", emb, 3, "", 0)
 
 	s.DeleteFact(id)
 
@@ -169,7 +169,7 @@ func TestBiTemporal_GetFactsAt(t *testing.T) {
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
 
 	// Insert a fact
-	id, _ := s.InsertFact("alice", "", "lives in Paris", "hp", emb, 3)
+	id, _ := s.InsertFact("alice", "", "lives in Paris", "hp", emb, 3, "", 0)
 	t1 := time.Now().UTC()
 
 	time.Sleep(2 * time.Millisecond)
@@ -204,7 +204,7 @@ func TestBiTemporal_HistoryAtDeletedFact(t *testing.T) {
 	s := tempStore(t, 4)
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
 
-	id, _ := s.InsertFact("alice", "", "likes pizza", "h1", emb, 3)
+	id, _ := s.InsertFact("alice", "", "likes pizza", "h1", emb, 3, "", 0)
 	t1 := time.Now().UTC()
 
 	time.Sleep(2 * time.Millisecond)
@@ -236,7 +236,7 @@ func TestBiTemporal_MemoryHistoryAt(t *testing.T) {
 	ctx := context.Background()
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
 
-	s.InsertFact("alice", "", "likes pizza", "h1", emb, 3)
+	s.InsertFact("alice", "", "likes pizza", "h1", emb, 3, "", 0)
 
 	facts, err := m.HistoryAt(ctx, "alice", time.Now().UTC())
 	if err != nil {
@@ -250,7 +250,7 @@ func TestBiTemporal_MemoryHistoryAt(t *testing.T) {
 func TestBiTemporal_CurrentQueriesUnchanged(t *testing.T) {
 	s := tempStore(t, 4)
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	id, _ := s.InsertFact("alice", "", "likes pizza", "h1", emb, 3)
+	id, _ := s.InsertFact("alice", "", "likes pizza", "h1", emb, 3, "", 0)
 
 	// GetFact
 	f, _ := s.GetFact(id)
@@ -274,8 +274,8 @@ func TestBiTemporal_CurrentQueriesUnchanged(t *testing.T) {
 func TestBiTemporal_DeleteAllHardDeletes(t *testing.T) {
 	s := tempStore(t, 4)
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	s.InsertFact("alice", "", "fact 1", "h1", emb, 3)
-	s.InsertFact("alice", "", "fact 2", "h2", emb, 3)
+	s.InsertFact("alice", "", "fact 1", "h1", emb, 3, "", 0)
+	s.InsertFact("alice", "", "fact 2", "h2", emb, 3, "", 0)
 
 	s.DeleteAllForUser("alice", "")
 
@@ -289,7 +289,7 @@ func TestBiTemporal_DeleteAllHardDeletes(t *testing.T) {
 func TestBiTemporal_UpdateFactRecordsHistory(t *testing.T) {
 	s := tempStore(t, 4)
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	oldID, _ := s.InsertFact("alice", "", "lives in Paris", "hp", emb, 3)
+	oldID, _ := s.InsertFact("alice", "", "lives in Paris", "hp", emb, 3, "", 0)
 
 	newID, _ := s.UpdateFact(oldID, "lives in Lyon", "hl", emb)
 
@@ -315,7 +315,7 @@ func TestBiTemporal_UpdateFactRecordsHistory(t *testing.T) {
 func TestBiTemporal_UpdateFactSignatureChange(t *testing.T) {
 	s := tempStore(t, 4)
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	oldID, _ := s.InsertFact("alice", "", "v1", "h1", emb, 3)
+	oldID, _ := s.InsertFact("alice", "", "v1", "h1", emb, 3, "", 0)
 
 	// UpdateFact now returns (string, error)
 	newID, err := s.UpdateFact(oldID, "v2", "h2", emb)
@@ -330,7 +330,7 @@ func TestBiTemporal_UpdateFactSignatureChange(t *testing.T) {
 func TestBiTemporal_GetFactTemporalFields(t *testing.T) {
 	s := tempStore(t, 4)
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	id, _ := s.InsertFact("alice", "", "test", "h1", emb, 3)
+	id, _ := s.InsertFact("alice", "", "test", "h1", emb, 3, "", 0)
 
 	f, _ := s.GetFact(id)
 	if f.ValidFrom == "" {
@@ -345,8 +345,8 @@ func TestBiTemporal_CleanupStaleRelationsRespectsSoftDelete(t *testing.T) {
 	s := tempStore(t, 4)
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
 
-	s.InsertFact("alice", "", "Alice works at Acme", "h1", emb, 3)
-	s.InsertFact("alice", "", "Alice lives in Paris", "h2", emb, 3)
+	s.InsertFact("alice", "", "Alice works at Acme", "h1", emb, 3, "", 0)
+	s.InsertFact("alice", "", "Alice lives in Paris", "h2", emb, 3, "", 0)
 
 	aliceID, _ := s.UpsertEntity("alice", "", "Alice", "person")
 	acmeID, _ := s.UpsertEntity("alice", "", "Acme", "organization")

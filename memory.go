@@ -142,9 +142,14 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID, names
 	if m.cfg.PromptFactExtraction != "" {
 		factPrompt = m.cfg.PromptFactExtraction
 	}
+	factSchema := factExtractionSchema
+	if m.cfg.EnableQualifiers {
+		factPrompt += qualifierPromptSuffix
+		factSchema = qualifierFactExtractionSchema
+	}
 
 	var extraction FactExtractionResult
-	tokens, err := m.llm.Complete(ctx, factPrompt, userContent, "fact_extraction", factExtractionSchema, &extraction)
+	tokens, err := m.llm.Complete(ctx, factPrompt, userContent, "fact_extraction", factSchema, &extraction)
 	totalTokens += tokens
 	if err != nil {
 		return nil, fmt.Errorf("extract facts: %w", err)
@@ -154,10 +159,14 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID, names
 		return &AddResult{Tokens: totalTokens}, nil
 	}
 
-	// Build importance map from extraction
+	// Build qualifier maps from extraction
 	importanceMap := make(map[string]int, len(extraction.Facts))
+	sourceMap := make(map[string]string, len(extraction.Facts))
+	confidenceMap := make(map[string]int, len(extraction.Facts))
 	for _, ef := range extraction.Facts {
 		importanceMap[ef.Text] = ef.Importance
+		sourceMap[ef.Text] = ef.Source
+		confidenceMap[ef.Text] = ef.Confidence
 	}
 
 	// Hash-filter extracted facts
@@ -205,6 +214,8 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID, names
 			embedding:  embeddings[i],
 			similar:    filtered,
 			importance: importanceMap[factText],
+			source:     sourceMap[factText],
+			confidence: confidenceMap[factText],
 		})
 	}
 
@@ -220,7 +231,7 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID, names
 	for _, c := range candidates {
 		if len(c.similar) == 0 {
 			// Novel fact: directly insert without reconciliation
-			id, err := m.store.InsertFact(userID, namespace, c.text, c.hash, c.embedding, c.importance)
+			id, err := m.store.InsertFact(userID, namespace, c.text, c.hash, c.embedding, c.importance, c.source, c.confidence)
 			if err != nil {
 				return nil, fmt.Errorf("insert novel fact: %w", err)
 			}
@@ -510,7 +521,7 @@ func (m *Memory) Undo(ctx context.Context, factID string) error {
 		if err != nil {
 			return fmt.Errorf("embed restored text: %w", err)
 		}
-		if err := m.store.ReinsertFact(factID, entry.UserID, entry.OldText, hashFact(entry.OldText), emb, 3); err != nil {
+		if err := m.store.ReinsertFact(factID, entry.UserID, entry.OldText, hashFact(entry.OldText), emb, 3, "", 0); err != nil {
 			return fmt.Errorf("reinsert fact: %w", err)
 		}
 
@@ -647,6 +658,17 @@ func (m *Memory) Recall(ctx context.Context, query string, userID string, opts *
 		return nil, fmt.Errorf("search entity IDs: %w", relErr)
 	}
 
+	// Qualifier-based filtering
+	if opts != nil && opts.MinConfidence > 0 {
+		var filtered []Fact
+		for _, f := range facts {
+			if f.Confidence >= opts.MinConfidence {
+				filtered = append(filtered, f)
+			}
+		}
+		facts = filtered
+	}
+
 	applyDecay(facts, m.cfg.DecayAlpha, m.cfg.DecayBeta)
 	if len(facts) > maxFacts {
 		facts = facts[:maxFacts]
@@ -690,6 +712,21 @@ func (m *Memory) Recall(ctx context.Context, query string, userID string, opts *
 		for _, f := range facts {
 			sb.WriteString("- ")
 			sb.WriteString(f.Text)
+			if f.Confidence > 0 || f.Source != "" {
+				sb.WriteString(" (")
+				wrote := false
+				if f.Confidence > 0 {
+					fmt.Fprintf(&sb, "confidence: %d", f.Confidence)
+					wrote = true
+				}
+				if f.Source != "" {
+					if wrote {
+						sb.WriteString(", ")
+					}
+					fmt.Fprintf(&sb, "source: %s", f.Source)
+				}
+				sb.WriteString(")")
+			}
 			sb.WriteString("\n")
 		}
 	}
@@ -917,7 +954,7 @@ func (m *Memory) Import(ctx context.Context, userID string, r io.Reader, opts ..
 			return fmt.Errorf("embed facts: %w", err)
 		}
 		for i, text := range factTexts {
-			if _, err := m.store.InsertFact(userID, o.namespace, text, hashFact(text), embs[i], 3); err != nil {
+			if _, err := m.store.InsertFact(userID, o.namespace, text, hashFact(text), embs[i], 3, "", 0); err != nil {
 				return fmt.Errorf("insert fact: %w", err)
 			}
 		}

@@ -30,22 +30,24 @@ type RelationResult struct {
 	Target   string `json:"target"`
 }
 
-// FactResult mirrors an extracted fact with importance.
+// FactResult mirrors an extracted fact with importance and optional qualifiers.
 type FactResult struct {
 	Text       string `json:"text"`
 	Importance int    `json:"importance"`
+	Source     string `json:"source,omitempty"`
+	Confidence int    `json:"confidence,omitempty"`
 }
 
 // FakeCompleter is a test double that returns pre-configured results based on
 // the schema name.
 type FakeCompleter struct {
-	Facts         []FactResult
-	Reconcile     []ReconcileAction
-	ReconcileFunc func(userPrompt string) []ReconcileAction // dynamic reconciliation (overrides Reconcile when set)
-	Entities      []EntityResult
-	Relations     []RelationResult
-	RerankIDs     []string         // IDs to return from rerank; nil = empty list (fallback to original order)
-	Tokens        int
+	Facts          []FactResult
+	Reconcile      []ReconcileAction
+	ReconcileFunc  func(userPrompt string) []ReconcileAction // dynamic reconciliation (overrides Reconcile when set)
+	Entities       []EntityResult
+	Relations      []RelationResult
+	RerankIDs      []string // IDs to return from rerank; nil = empty list (fallback to original order)
+	Tokens         int
 	Errors         map[string]error // schemaName -> error to return (before normal routing)
 	SessionSummary string           // Custom summary text for session_summary schema
 

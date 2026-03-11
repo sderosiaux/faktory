@@ -35,7 +35,7 @@ func (s *Store) InsertSummaryFact(userID, namespace, text, hash string, embeddin
 // GetSummaries returns summary facts for a user+namespace, newest first.
 func (s *Store) GetSummaries(userID, namespace string, limit int) ([]Fact, error) {
 	rows, err := s.db.Query(
-		"SELECT id, user_id, text, hash, created_at, updated_at, access_count FROM facts WHERE user_id = ? AND namespace = ? AND is_summary = 1 ORDER BY created_at DESC LIMIT ?",
+		"SELECT id, user_id, text, hash, created_at, updated_at, access_count, source, confidence FROM facts WHERE user_id = ? AND namespace = ? AND is_summary = 1 ORDER BY created_at DESC LIMIT ?",
 		userID, namespace, limit)
 	if err != nil {
 		return nil, err
@@ -44,7 +44,7 @@ func (s *Store) GetSummaries(userID, namespace string, limit int) ([]Fact, error
 	var facts []Fact
 	for rows.Next() {
 		var f Fact
-		if err := rows.Scan(&f.ID, &f.UserID, &f.Text, &f.Hash, &f.CreatedAt, &f.UpdatedAt, &f.AccessCount); err != nil {
+		if err := rows.Scan(&f.ID, &f.UserID, &f.Text, &f.Hash, &f.CreatedAt, &f.UpdatedAt, &f.AccessCount, &f.Source, &f.Confidence); err != nil {
 			return nil, err
 		}
 		f.IsSummary = true
