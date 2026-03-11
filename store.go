@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS facts (
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
     access_count    INTEGER NOT NULL DEFAULT 0,
-    last_accessed_at TEXT
+    last_accessed_at TEXT,
+    is_summary      INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS entities (
@@ -127,6 +128,9 @@ func OpenStore(dbPath string, dimension int) (*Store, error) {
 	// Additive migration: cluster_id column (safe no-op on fresh DBs)
 	db.Exec("ALTER TABLE entities ADD COLUMN cluster_id INTEGER NOT NULL DEFAULT 0")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_entities_cluster ON entities(user_id, namespace, cluster_id)")
+
+	// Additive migration: is_summary column (safe no-op on fresh DBs)
+	db.Exec("ALTER TABLE facts ADD COLUMN is_summary INTEGER NOT NULL DEFAULT 0")
 
 	// Create vec0 virtual tables
 	for _, tbl := range []string{"fact_embeddings", "entity_embeddings"} {
@@ -421,12 +425,12 @@ func (s *Store) BumpAccess(ids []string) error {
 // CountFacts returns the total number of facts for a user+namespace.
 func (s *Store) CountFacts(userID, namespace string) (int, error) {
 	var count int
-	err := s.db.QueryRow("SELECT COUNT(*) FROM facts WHERE user_id = ? AND namespace = ? AND invalid_at IS NULL", userID, namespace).Scan(&count)
+	err := s.db.QueryRow("SELECT COUNT(*) FROM facts WHERE user_id = ? AND namespace = ? AND invalid_at IS NULL AND is_summary = 0", userID, namespace).Scan(&count)
 	return count, err
 }
 
 func (s *Store) GetAllFacts(userID, namespace string, limit int) ([]Fact, error) {
-	rows, err := s.db.Query("SELECT id, user_id, text, hash, created_at, updated_at, access_count, importance FROM facts WHERE user_id = ? AND namespace = ? AND invalid_at IS NULL ORDER BY created_at DESC LIMIT ?", userID, namespace, limit)
+	rows, err := s.db.Query("SELECT id, user_id, text, hash, created_at, updated_at, access_count, importance FROM facts WHERE user_id = ? AND namespace = ? AND invalid_at IS NULL AND is_summary = 0 ORDER BY created_at DESC LIMIT ?", userID, namespace, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -465,6 +469,7 @@ func (s *Store) SearchFacts(queryEmbedding []float32, userID, namespace string, 
 		  AND f.user_id = ?
 		  AND f.namespace = ?
 		  AND f.invalid_at IS NULL
+		  AND f.is_summary = 0
 		ORDER BY e.distance
 		LIMIT ?
 	`, string(embJSON), kFetch, userID, namespace, limit)

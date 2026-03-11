@@ -33,6 +33,7 @@ type Fact struct {
 	Importance  int     `json:"importance,omitempty"`
 	ValidFrom   string  `json:"valid_from,omitempty"`
 	InvalidAt   string  `json:"invalid_at,omitempty"`
+	IsSummary   bool    `json:"is_summary,omitempty"`
 }
 
 // Relation is a stored entity-relation-entity triplet.

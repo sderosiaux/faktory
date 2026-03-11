@@ -703,6 +703,19 @@ func (m *Memory) Recall(ctx context.Context, query string, userID string, opts *
 		}
 	}
 
+	// Append session summaries
+	if summaries, err := m.store.GetSummaries(userID, ns, 3); err == nil && len(summaries) > 0 {
+		if sb.Len() > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString("Session summaries:\n")
+		for _, s := range summaries {
+			sb.WriteString("- ")
+			sb.WriteString(s.Text)
+			sb.WriteString("\n")
+		}
+	}
+
 	return &RecallResult{
 		Facts:     facts,
 		Relations: rels,

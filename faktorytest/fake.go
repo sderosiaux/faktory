@@ -131,6 +131,12 @@ func (fc *FakeCompleter) Complete(_ context.Context, system, user string, schema
 			ids = []string{}
 		}
 		payload = map[string]any{"ranked_ids": ids}
+	case "session_summary":
+		summary := "Session discussed various topics"
+		if fc.SessionSummary != "" {
+			summary = fc.SessionSummary
+		}
+		payload = map[string]any{"summary": summary}
 	default:
 		return 0, fmt.Errorf("unknown schema: %s", schemaName)
 	}
