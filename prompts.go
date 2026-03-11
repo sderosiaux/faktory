@@ -14,7 +14,13 @@ Rules:
 - If nothing worth remembering, return an empty list.
 - Focus on: preferences, personal details, plans, professional info, relationships.
 - When a user mentions switching or changing something (e.g., "switched from X to Y"), extract the NEW state as a standalone fact (e.g., "Uses Y"), not the transition.
-- Extract ALL facts, even minor ones mentioned alongside bigger news. Do not skip secondary details.`
+- Extract ALL facts, even minor ones mentioned alongside bigger news. Do not skip secondary details.
+- Rate each fact's importance from 1 to 5:
+  1 = trivial/transient (e.g., "the weather is nice today")
+  2 = minor preference or detail
+  3 = standard personal fact (default)
+  4 = significant life detail (job, location, relationship)
+  5 = core identity or critical info`
 
 const reconcilePrompt = `You manage a fact store. Given existing facts and newly extracted facts, decide what to do with each.
 
@@ -85,8 +91,14 @@ var profileSchema = json.RawMessage(`{
 
 // --- Response types ---
 
+// ExtractedFact is a single fact with its importance rating.
+type ExtractedFact struct {
+	Text       string `json:"text"`
+	Importance int    `json:"importance"`
+}
+
 type FactExtractionResult struct {
-	Facts []string `json:"facts"`
+	Facts []ExtractedFact `json:"facts"`
 }
 
 type ReconcileAction struct {
@@ -124,7 +136,15 @@ var factExtractionSchema = json.RawMessage(`{
   "properties": {
     "facts": {
       "type": "array",
-      "items": {"type": "string"}
+      "items": {
+        "type": "object",
+        "properties": {
+          "text": {"type": "string"},
+          "importance": {"type": "integer", "minimum": 1, "maximum": 5}
+        },
+        "required": ["text", "importance"],
+        "additionalProperties": false
+      }
     }
   },
   "required": ["facts"],

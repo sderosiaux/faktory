@@ -78,7 +78,7 @@ func (s *Store) SearchFactsBM25(query, userID, namespace string, limit int) ([]F
 		return nil, nil
 	}
 	rows, err := s.db.Query(`
-		SELECT f.id, f.user_id, f.text, f.hash, f.created_at, f.updated_at, f.access_count,
+		SELECT f.id, f.user_id, f.text, f.hash, f.created_at, f.updated_at, f.access_count, f.importance,
 		       bm25(facts_fts) AS rank
 		FROM facts_fts fts
 		JOIN facts f ON f.rowid = fts.rowid
@@ -97,7 +97,7 @@ func (s *Store) SearchFactsBM25(query, userID, namespace string, limit int) ([]F
 	for rows.Next() {
 		var f Fact
 		var rank float64
-		if err := rows.Scan(&f.ID, &f.UserID, &f.Text, &f.Hash, &f.CreatedAt, &f.UpdatedAt, &f.AccessCount, &rank); err != nil {
+		if err := rows.Scan(&f.ID, &f.UserID, &f.Text, &f.Hash, &f.CreatedAt, &f.UpdatedAt, &f.AccessCount, &f.Importance, &rank); err != nil {
 			return nil, err
 		}
 		// bm25() returns negative scores (more negative = more relevant); normalize to (0,1]

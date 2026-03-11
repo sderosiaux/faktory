@@ -27,7 +27,7 @@ func newTestMemoryWithDisableGraph(t *testing.T, fc *faktorytest.FakeCompleter, 
 
 func TestDisableGraph_NoEntityExtraction(t *testing.T) {
 	fc := &faktorytest.FakeCompleter{
-		Facts: []string{"likes Go", "lives in Lyon"},
+		Facts: []faktorytest.FactResult{{Text: "likes Go", Importance: 3}, {Text: "lives in Lyon", Importance: 3}},
 		Reconcile: []faktorytest.ReconcileAction{
 			{Text: "likes Go", Event: "ADD"},
 			{Text: "lives in Lyon", Event: "ADD"},
@@ -79,7 +79,7 @@ func TestDisableGraph_NoEntityExtraction(t *testing.T) {
 
 func TestDisableGraph_RecallStillWorks(t *testing.T) {
 	fc := &faktorytest.FakeCompleter{
-		Facts: []string{"prefers dark roast coffee"},
+		Facts: []faktorytest.FactResult{{Text: "prefers dark roast coffee", Importance: 3}},
 		Reconcile: []faktorytest.ReconcileAction{
 			{Text: "prefers dark roast coffee", Event: "ADD"},
 		},
@@ -118,7 +118,7 @@ func TestDisableGraph_RecallStillWorks(t *testing.T) {
 
 func TestDisableGraph_False_GraphRuns(t *testing.T) {
 	fc := &faktorytest.FakeCompleter{
-		Facts: []string{"speaks French"},
+		Facts: []faktorytest.FactResult{{Text: "speaks French", Importance: 3}},
 		Reconcile: []faktorytest.ReconcileAction{
 			{Text: "speaks French", Event: "ADD"},
 		},

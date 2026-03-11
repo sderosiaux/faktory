@@ -30,10 +30,16 @@ type RelationResult struct {
 	Target   string `json:"target"`
 }
 
+// FactResult mirrors an extracted fact with importance.
+type FactResult struct {
+	Text       string `json:"text"`
+	Importance int    `json:"importance"`
+}
+
 // FakeCompleter is a test double that returns pre-configured results based on
 // the schema name.
 type FakeCompleter struct {
-	Facts         []string
+	Facts         []FactResult
 	Reconcile     []ReconcileAction
 	ReconcileFunc func(userPrompt string) []ReconcileAction // dynamic reconciliation (overrides Reconcile when set)
 	Entities      []EntityResult

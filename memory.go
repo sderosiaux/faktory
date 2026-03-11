@@ -154,11 +154,17 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID, names
 		return &AddResult{Tokens: totalTokens}, nil
 	}
 
+	// Build importance map from extraction
+	importanceMap := make(map[string]int, len(extraction.Facts))
+	for _, ef := range extraction.Facts {
+		importanceMap[ef.Text] = ef.Importance
+	}
+
 	// Hash-filter extracted facts
 	var textsToEmbed []string
 	var hashes []string
-	for _, factText := range extraction.Facts {
-		h := hashFact(factText)
+	for _, ef := range extraction.Facts {
+		h := hashFact(ef.Text)
 		exists, err := m.store.FactExistsByHash(userID, namespace, h)
 		if err != nil {
 			return nil, fmt.Errorf("check hash: %w", err)
@@ -166,7 +172,7 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID, names
 		if exists {
 			continue
 		}
-		textsToEmbed = append(textsToEmbed, factText)
+		textsToEmbed = append(textsToEmbed, ef.Text)
 		hashes = append(hashes, h)
 	}
 
@@ -194,10 +200,11 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID, names
 			}
 		}
 		candidates = append(candidates, candidateFact{
-			text:      factText,
-			hash:      hashes[i],
-			embedding: embeddings[i],
-			similar:   filtered,
+			text:       factText,
+			hash:       hashes[i],
+			embedding:  embeddings[i],
+			similar:    filtered,
+			importance: importanceMap[factText],
 		})
 	}
 
@@ -213,7 +220,7 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID, names
 	for _, c := range candidates {
 		if len(c.similar) == 0 {
 			// Novel fact: directly insert without reconciliation
-			id, err := m.store.InsertFact(userID, namespace, c.text, c.hash, c.embedding)
+			id, err := m.store.InsertFact(userID, namespace, c.text, c.hash, c.embedding, c.importance)
 			if err != nil {
 				return nil, fmt.Errorf("insert novel fact: %w", err)
 			}
@@ -254,7 +261,11 @@ func (m *Memory) addFacts(ctx context.Context, messages []Message, userID, names
 		}
 	}
 
-	result.ExtractedFacts = extraction.Facts
+	extractedTexts := make([]string, len(extraction.Facts))
+	for i, ef := range extraction.Facts {
+		extractedTexts[i] = ef.Text
+	}
+	result.ExtractedFacts = extractedTexts
 	result.Tokens = totalTokens
 	return result, nil
 }
@@ -486,7 +497,7 @@ func (m *Memory) Undo(ctx context.Context, factID string) error {
 		if err != nil {
 			return fmt.Errorf("embed restored text: %w", err)
 		}
-		if err := m.store.ReinsertFact(factID, entry.UserID, entry.OldText, hashFact(entry.OldText), emb); err != nil {
+		if err := m.store.ReinsertFact(factID, entry.UserID, entry.OldText, hashFact(entry.OldText), emb, 3); err != nil {
 			return fmt.Errorf("reinsert fact: %w", err)
 		}
 
@@ -823,7 +834,7 @@ func (m *Memory) Import(ctx context.Context, userID string, r io.Reader, opts ..
 			return fmt.Errorf("embed facts: %w", err)
 		}
 		for i, text := range factTexts {
-			if _, err := m.store.InsertFact(userID, o.namespace, text, hashFact(text), embs[i]); err != nil {
+			if _, err := m.store.InsertFact(userID, o.namespace, text, hashFact(text), embs[i], 3); err != nil {
 				return fmt.Errorf("insert fact: %w", err)
 			}
 		}

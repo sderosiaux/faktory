@@ -31,7 +31,7 @@ func newTestMemoryWithFake(t *testing.T, fc *faktorytest.FakeCompleter) *Memory 
 
 func TestAdd_EmptyFactExtraction(t *testing.T) {
 	fc := &faktorytest.FakeCompleter{
-		Facts:     []string{},
+		Facts:     []faktorytest.FactResult{},
 		Reconcile: []faktorytest.ReconcileAction{},
 		Entities:  []faktorytest.EntityResult{},
 		Relations: []faktorytest.RelationResult{},
@@ -58,7 +58,7 @@ func TestAdd_EmptyFactExtraction(t *testing.T) {
 
 func TestAdd_ReconciliationHallucinatedID(t *testing.T) {
 	fc := &faktorytest.FakeCompleter{
-		Facts: []string{"likes Go"},
+		Facts: []faktorytest.FactResult{{Text: "likes Go", Importance: 3}},
 		Reconcile: []faktorytest.ReconcileAction{
 			// ID "999" does not exist in the integer mapping.
 			{ID: "999", Text: "likes Go updated", Event: "UPDATE"},
@@ -72,7 +72,7 @@ func TestAdd_ReconciliationHallucinatedID(t *testing.T) {
 	// forcing the candidate through the reconciliation path.
 	fe := &faktorytest.FakeEmbedder{Dim: 8}
 	emb, _ := fe.Embed(context.Background(), "likes Go")
-	if _, err := mem.store.InsertFact("u1", "", "likes Go old", hashFact("likes Go old"), emb); err != nil {
+	if _, err := mem.store.InsertFact("u1", "", "likes Go old", hashFact("likes Go old"), emb, 3); err != nil {
 		t.Fatal(err)
 	}
 
@@ -93,7 +93,7 @@ func TestAdd_ReconciliationHallucinatedID(t *testing.T) {
 
 func TestAdd_ReconciliationInvalidEvent(t *testing.T) {
 	fc := &faktorytest.FakeCompleter{
-		Facts: []string{"likes Rust"},
+		Facts: []faktorytest.FactResult{{Text: "likes Rust", Importance: 3}},
 		Reconcile: []faktorytest.ReconcileAction{
 			// "MERGE" is not a valid event type.
 			{ID: "0", Text: "likes Rust", Event: "MERGE"},
@@ -106,7 +106,7 @@ func TestAdd_ReconciliationInvalidEvent(t *testing.T) {
 	// Pre-populate with a similar fact so the candidate goes through reconciliation.
 	fe := &faktorytest.FakeEmbedder{Dim: 8}
 	emb, _ := fe.Embed(context.Background(), "likes Rust")
-	if _, err := mem.store.InsertFact("u1", "", "likes Rust old", hashFact("likes Rust old"), emb); err != nil {
+	if _, err := mem.store.InsertFact("u1", "", "likes Rust old", hashFact("likes Rust old"), emb, 3); err != nil {
 		t.Fatal(err)
 	}
 
@@ -130,7 +130,7 @@ func TestAdd_ReconciliationInvalidEvent(t *testing.T) {
 
 func TestAdd_DuplicateHashSkipsReconciliation(t *testing.T) {
 	fc := &faktorytest.FakeCompleter{
-		Facts: []string{"likes pizza"},
+		Facts: []faktorytest.FactResult{{Text: "likes pizza", Importance: 3}},
 		Reconcile: []faktorytest.ReconcileAction{
 			{ID: "0", Text: "likes pizza", Event: "ADD"},
 		},
@@ -173,7 +173,7 @@ func TestAdd_DuplicateHashSkipsReconciliation(t *testing.T) {
 
 func TestAdd_GraphPipelinePronounsFiltered(t *testing.T) {
 	fc := &faktorytest.FakeCompleter{
-		Facts: []string{"speaks French"},
+		Facts: []faktorytest.FactResult{{Text: "speaks French", Importance: 3}},
 		Reconcile: []faktorytest.ReconcileAction{
 			{ID: "0", Text: "speaks French", Event: "ADD"},
 		},
@@ -217,7 +217,7 @@ func TestAdd_GraphPipelinePronounsFiltered(t *testing.T) {
 
 func TestAdd_GraphPipelineEmpty(t *testing.T) {
 	fc := &faktorytest.FakeCompleter{
-		Facts: []string{"likes hiking"},
+		Facts: []faktorytest.FactResult{{Text: "likes hiking", Importance: 3}},
 		Reconcile: []faktorytest.ReconcileAction{
 			{ID: "0", Text: "likes hiking", Event: "ADD"},
 		},
@@ -252,7 +252,7 @@ func TestAdd_GraphPipelineEmpty(t *testing.T) {
 
 func TestAdd_GraphPipelineFailureNonFatal(t *testing.T) {
 	fc := &faktorytest.FakeCompleter{
-		Facts: []string{"lives in Tokyo"},
+		Facts: []faktorytest.FactResult{{Text: "lives in Tokyo", Importance: 3}},
 		Reconcile: []faktorytest.ReconcileAction{
 			{ID: "0", Text: "lives in Tokyo", Event: "ADD"},
 		},

@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS facts (
     namespace       TEXT NOT NULL DEFAULT '',
     text            TEXT NOT NULL,
     hash            TEXT NOT NULL,
+    importance      INTEGER NOT NULL DEFAULT 3,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
     access_count    INTEGER NOT NULL DEFAULT 0,
@@ -136,6 +137,14 @@ func OpenStore(dbPath string, dimension int) (*Store, error) {
 		return nil, fmt.Errorf("migrate fts5: %w", err)
 	}
 
+	// Additive migration: importance column
+	if _, err := db.Exec("ALTER TABLE facts ADD COLUMN importance INTEGER NOT NULL DEFAULT 3"); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column") {
+			db.Close()
+			return nil, fmt.Errorf("migrate importance: %w", err)
+		}
+	}
+
 	return &Store{db: db, dimension: dimension}, nil
 }
 
@@ -153,7 +162,10 @@ func newID() string {
 
 // --- Facts ---
 
-func (s *Store) InsertFact(userID, namespace, text, hash string, embedding []float32) (string, error) {
+func (s *Store) InsertFact(userID, namespace, text, hash string, embedding []float32, importance int) (string, error) {
+	if importance <= 0 || importance > 5 {
+		importance = 3
+	}
 	id := newID()
 	ts := now()
 	tx, err := s.db.Begin()
@@ -162,8 +174,8 @@ func (s *Store) InsertFact(userID, namespace, text, hash string, embedding []flo
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec("INSERT INTO facts (id, user_id, namespace, text, hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		id, userID, namespace, text, hash, ts, ts); err != nil {
+	if _, err := tx.Exec("INSERT INTO facts (id, user_id, namespace, text, hash, importance, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		id, userID, namespace, text, hash, importance, ts, ts); err != nil {
 		return "", fmt.Errorf("insert fact: %w", err)
 	}
 
@@ -255,8 +267,8 @@ func (s *Store) DeleteFact(id string) error {
 
 func (s *Store) GetFact(id string) (*Fact, error) {
 	var f Fact
-	err := s.db.QueryRow("SELECT id, user_id, text, hash, created_at, updated_at, access_count FROM facts WHERE id = ?", id).
-		Scan(&f.ID, &f.UserID, &f.Text, &f.Hash, &f.CreatedAt, &f.UpdatedAt, &f.AccessCount)
+	err := s.db.QueryRow("SELECT id, user_id, text, hash, created_at, updated_at, access_count, importance FROM facts WHERE id = ?", id).
+		Scan(&f.ID, &f.UserID, &f.Text, &f.Hash, &f.CreatedAt, &f.UpdatedAt, &f.AccessCount, &f.Importance)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -267,7 +279,10 @@ func (s *Store) GetFact(id string) (*Fact, error) {
 }
 
 // ReinsertFact re-inserts a fact with a specific ID (used by Undo after DELETE).
-func (s *Store) ReinsertFact(id, userID, text, hash string, embedding []float32) error {
+func (s *Store) ReinsertFact(id, userID, text, hash string, embedding []float32, importance int) error {
+	if importance <= 0 || importance > 5 {
+		importance = 3
+	}
 	ts := now()
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -275,8 +290,8 @@ func (s *Store) ReinsertFact(id, userID, text, hash string, embedding []float32)
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec("INSERT INTO facts (id, user_id, text, hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-		id, userID, text, hash, ts, ts); err != nil {
+	if _, err := tx.Exec("INSERT INTO facts (id, user_id, text, hash, importance, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		id, userID, text, hash, importance, ts, ts); err != nil {
 		return fmt.Errorf("reinsert fact: %w", err)
 	}
 
@@ -366,7 +381,7 @@ func (s *Store) CountFacts(userID, namespace string) (int, error) {
 }
 
 func (s *Store) GetAllFacts(userID, namespace string, limit int) ([]Fact, error) {
-	rows, err := s.db.Query("SELECT id, user_id, text, hash, created_at, updated_at, access_count FROM facts WHERE user_id = ? AND namespace = ? ORDER BY created_at DESC LIMIT ?", userID, namespace, limit)
+	rows, err := s.db.Query("SELECT id, user_id, text, hash, created_at, updated_at, access_count, importance FROM facts WHERE user_id = ? AND namespace = ? ORDER BY created_at DESC LIMIT ?", userID, namespace, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -375,7 +390,7 @@ func (s *Store) GetAllFacts(userID, namespace string, limit int) ([]Fact, error)
 	var facts []Fact
 	for rows.Next() {
 		var f Fact
-		if err := rows.Scan(&f.ID, &f.UserID, &f.Text, &f.Hash, &f.CreatedAt, &f.UpdatedAt, &f.AccessCount); err != nil {
+		if err := rows.Scan(&f.ID, &f.UserID, &f.Text, &f.Hash, &f.CreatedAt, &f.UpdatedAt, &f.AccessCount, &f.Importance); err != nil {
 			return nil, err
 		}
 		facts = append(facts, f)
@@ -397,7 +412,7 @@ func (s *Store) SearchFacts(queryEmbedding []float32, userID, namespace string, 
 	}
 
 	rows, err := s.db.Query(`
-		SELECT f.id, f.user_id, f.text, f.hash, f.created_at, f.updated_at, f.access_count, e.distance
+		SELECT f.id, f.user_id, f.text, f.hash, f.created_at, f.updated_at, f.access_count, f.importance, e.distance
 		FROM fact_embeddings e
 		JOIN facts f ON f.id = e.id
 		WHERE e.embedding MATCH ?
@@ -416,7 +431,7 @@ func (s *Store) SearchFacts(queryEmbedding []float32, userID, namespace string, 
 	for rows.Next() {
 		var f Fact
 		var dist float64
-		if err := rows.Scan(&f.ID, &f.UserID, &f.Text, &f.Hash, &f.CreatedAt, &f.UpdatedAt, &f.AccessCount, &dist); err != nil {
+		if err := rows.Scan(&f.ID, &f.UserID, &f.Text, &f.Hash, &f.CreatedAt, &f.UpdatedAt, &f.AccessCount, &f.Importance, &dist); err != nil {
 			return nil, err
 		}
 		f.Score = 1 - dist // cosine distance → similarity

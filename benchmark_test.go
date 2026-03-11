@@ -13,7 +13,7 @@ import (
 func BenchmarkAdd(b *testing.B) {
 	db := filepath.Join(b.TempDir(), "bench.db")
 	fc := &faktorytest.FakeCompleter{
-		Facts: []string{"fact one", "fact two", "fact three"},
+		Facts: []faktorytest.FactResult{{Text: "fact one", Importance: 3}, {Text: "fact two", Importance: 3}, {Text: "fact three", Importance: 3}},
 		Reconcile: []faktorytest.ReconcileAction{
 			{ID: "0", Text: "fact one", Event: "ADD"},
 			{ID: "1", Text: "fact two", Event: "ADD"},
@@ -63,7 +63,7 @@ func BenchmarkSearch(b *testing.B) {
 			for i := 0; i < n; i++ {
 				text := fmt.Sprintf("fact number %d about something interesting", i)
 				emb, _ := embedder.Embed(ctx, text)
-				_, err := mem.store.InsertFact("u1", "", text, hashFact(text), emb)
+				_, err := mem.store.InsertFact("u1", "", text, hashFact(text), emb, 3)
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -97,7 +97,7 @@ func BenchmarkRecall(b *testing.B) {
 			for i := 0; i < n; i++ {
 				text := fmt.Sprintf("fact number %d about something", i)
 				emb, _ := embedder.Embed(ctx, text)
-				_, err := mem.store.InsertFact("u1", "", text, hashFact(text), emb)
+				_, err := mem.store.InsertFact("u1", "", text, hashFact(text), emb, 3)
 				if err != nil {
 					b.Fatal(err)
 				}

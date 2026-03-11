@@ -24,7 +24,12 @@ func applyDecay(facts []Fact, alpha, beta float64) {
 		}
 		ageFactor := 1.0 / (1.0 + alpha*ageDays)
 		accessFactor := 1.0 + beta*math.Log1p(float64(facts[i].AccessCount))
-		facts[i].Score = facts[i].Score * ageFactor * accessFactor
+		imp := facts[i].Importance
+		if imp == 0 {
+			imp = 3
+		}
+		importanceFactor := 1.0 + 0.2*float64(imp-3)
+		facts[i].Score = facts[i].Score * ageFactor * accessFactor * importanceFactor
 	}
 	sort.Slice(facts, func(i, j int) bool {
 		return facts[i].Score > facts[j].Score

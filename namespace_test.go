@@ -10,9 +10,9 @@ func TestNamespaceFactIsolation(t *testing.T) {
 	s := tempStore(t, 4)
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
 
-	s.InsertFact("alice", "work", "uses Go at work", "h1", emb)
-	s.InsertFact("alice", "personal", "likes cooking at home", "h2", emb)
-	s.InsertFact("alice", "", "general fact", "h3", emb)
+	s.InsertFact("alice", "work", "uses Go at work", "h1", emb, 3)
+	s.InsertFact("alice", "personal", "likes cooking at home", "h2", emb, 3)
+	s.InsertFact("alice", "", "general fact", "h3", emb, 3)
 
 	workFacts, err := s.GetAllFacts("alice", "work", 100)
 	if err != nil {
@@ -45,8 +45,8 @@ func TestNamespaceFactIsolation(t *testing.T) {
 func TestNamespaceSearchIsolation(t *testing.T) {
 	s := tempStore(t, 4)
 
-	s.InsertFact("alice", "work", "uses Go", "h1", []float32{1, 0, 0, 0})
-	s.InsertFact("alice", "personal", "likes cooking", "h2", []float32{1, 0, 0, 0})
+	s.InsertFact("alice", "work", "uses Go", "h1", []float32{1, 0, 0, 0}, 3)
+	s.InsertFact("alice", "personal", "likes cooking", "h2", []float32{1, 0, 0, 0}, 3)
 
 	workResults, err := s.SearchFacts([]float32{1, 0, 0, 0}, "alice", "work", 10)
 	if err != nil {
@@ -132,7 +132,7 @@ func TestEmptyNamespaceDefault(t *testing.T) {
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
 
 	// Insert with empty namespace (default behavior)
-	id, err := s.InsertFact("alice", "", "likes pizza", "h1", emb)
+	id, err := s.InsertFact("alice", "", "likes pizza", "h1", emb, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,9 +169,9 @@ func TestNamespaceDeleteAll(t *testing.T) {
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
 
 	// Insert into two namespaces
-	s.InsertFact("alice", "work", "work fact 1", "wh1", emb)
-	s.InsertFact("alice", "work", "work fact 2", "wh2", emb)
-	s.InsertFact("alice", "personal", "personal fact", "ph1", emb)
+	s.InsertFact("alice", "work", "work fact 1", "wh1", emb, 3)
+	s.InsertFact("alice", "work", "work fact 2", "wh2", emb, 3)
+	s.InsertFact("alice", "personal", "personal fact", "ph1", emb, 3)
 
 	srcW, _ := s.UpsertEntity("alice", "work", "Acme", "organization")
 	tgtW, _ := s.UpsertEntity("alice", "work", "Alice", "person")
@@ -225,8 +225,8 @@ func TestNamespaceRecall(t *testing.T) {
 	// Insert facts in two namespaces with real embeddings
 	workEmb, _ := fe.Embed(ctx, "uses Go at work")
 	personalEmb, _ := fe.Embed(ctx, "likes cooking")
-	s.InsertFact("alice", "work", "uses Go at work", "wh1", workEmb)
-	s.InsertFact("alice", "personal", "likes cooking", "ph1", personalEmb)
+	s.InsertFact("alice", "work", "uses Go at work", "wh1", workEmb, 3)
+	s.InsertFact("alice", "personal", "likes cooking", "ph1", personalEmb, 3)
 
 	// Recall with work namespace
 	workResult, err := m.Recall(ctx, "uses Go at work", "alice", &RecallOptions{
@@ -298,7 +298,7 @@ func TestNamespaceHashDedup(t *testing.T) {
 	s := tempStore(t, 4)
 
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
-	s.InsertFact("alice", "work", "likes pizza", "same_hash", emb)
+	s.InsertFact("alice", "work", "likes pizza", "same_hash", emb, 3)
 
 	// Same hash in different namespace should not collide
 	exists, _ := s.FactExistsByHash("alice", "personal", "same_hash")
@@ -364,8 +364,8 @@ func TestNamespacePruneHistory(t *testing.T) {
 	s := tempStore(t, 4)
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
 
-	s.InsertFact("alice", "work", "work fact", "wh1", emb)
-	s.InsertFact("alice", "personal", "personal fact", "ph1", emb)
+	s.InsertFact("alice", "work", "work fact", "wh1", emb, 3)
+	s.InsertFact("alice", "personal", "personal fact", "ph1", emb, 3)
 
 	// Backdate all work namespace history
 	_, err := s.db.Exec(

@@ -10,7 +10,7 @@ import (
 func TestAddResult_TotalFacts(t *testing.T) {
 	callCount := 0
 	fc := &faktorytest.FakeCompleter{
-		Facts: []string{"likes Go", "lives in Paris"},
+		Facts: []faktorytest.FactResult{{Text: "likes Go", Importance: 3}, {Text: "lives in Paris", Importance: 3}},
 		ReconcileFunc: func(_ string) []faktorytest.ReconcileAction {
 			callCount++
 			if callCount == 1 {
@@ -43,7 +43,7 @@ func TestAddResult_TotalFacts(t *testing.T) {
 	}
 
 	// Second Add with different facts — change what the fake returns.
-	fc.Facts = []string{"speaks French", "plays piano"}
+	fc.Facts = []faktorytest.FactResult{{Text: "speaks French", Importance: 3}, {Text: "plays piano", Importance: 3}}
 	r2, err := mem.Add(ctx, []Message{
 		{Role: "user", Content: "I speak French and play piano"},
 	}, "u1")
@@ -57,7 +57,7 @@ func TestAddResult_TotalFacts(t *testing.T) {
 
 func TestAddResult_TotalFacts_EmptyExtraction(t *testing.T) {
 	fc := &faktorytest.FakeCompleter{
-		Facts:     []string{},
+		Facts:     []faktorytest.FactResult{},
 		Entities:  []faktorytest.EntityResult{},
 		Relations: []faktorytest.RelationResult{},
 		Tokens:    5,
@@ -90,11 +90,11 @@ func TestCountFacts(t *testing.T) {
 	}
 
 	emb, _ := fe.Embed(ctx, "fact one")
-	if _, err := mem.store.InsertFact("u1", "", "fact one", hashFact("fact one"), emb); err != nil {
+	if _, err := mem.store.InsertFact("u1", "", "fact one", hashFact("fact one"), emb, 3); err != nil {
 		t.Fatal(err)
 	}
 	emb, _ = fe.Embed(ctx, "fact two")
-	if _, err := mem.store.InsertFact("u1", "", "fact two", hashFact("fact two"), emb); err != nil {
+	if _, err := mem.store.InsertFact("u1", "", "fact two", hashFact("fact two"), emb, 3); err != nil {
 		t.Fatal(err)
 	}
 

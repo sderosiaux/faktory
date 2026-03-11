@@ -37,7 +37,7 @@ func TestAddWithFakes(t *testing.T) {
 		DBPath:         dbPath,
 		EmbedDimension: 8,
 		Completer: &faktorytest.FakeCompleter{
-			Facts: []string{"likes Go", "lives in Paris"},
+			Facts: []faktorytest.FactResult{{Text: "likes Go", Importance: 3}, {Text: "lives in Paris", Importance: 3}},
 			Reconcile: []faktorytest.ReconcileAction{
 				{ID: "0", Text: "likes Go", Event: "ADD"},
 				{ID: "1", Text: "lives in Paris", Event: "ADD"},
@@ -83,7 +83,7 @@ func TestSearchWithFakes(t *testing.T) {
 		DBPath:         dbPath,
 		EmbedDimension: 8,
 		Completer: &faktorytest.FakeCompleter{
-			Facts: []string{"likes Go"},
+			Facts: []faktorytest.FactResult{{Text: "likes Go", Importance: 3}},
 			Reconcile: []faktorytest.ReconcileAction{
 				{ID: "0", Text: "likes Go", Event: "ADD"},
 			},
@@ -123,7 +123,7 @@ func TestAddResultContainsExtractedFacts(t *testing.T) {
 		DBPath:         dbPath,
 		EmbedDimension: 8,
 		Completer: &faktorytest.FakeCompleter{
-			Facts: []string{"likes pizza", "speaks French"},
+			Facts: []faktorytest.FactResult{{Text: "likes pizza", Importance: 3}, {Text: "speaks French", Importance: 3}},
 			Reconcile: []faktorytest.ReconcileAction{
 				{ID: "0", Text: "likes pizza", Event: "ADD"},
 				{ID: "1", Text: "speaks French", Event: "ADD"},

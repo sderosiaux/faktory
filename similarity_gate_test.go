@@ -42,14 +42,14 @@ func seedFactWithEmbedding(t *testing.T, mem *Memory, userID, ns, storedText, ma
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mem.store.InsertFact(userID, ns, storedText, hashFact(storedText), emb); err != nil {
+	if _, err := mem.store.InsertFact(userID, ns, storedText, hashFact(storedText), emb, 3); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestSimilarityGateSkipsReconciliation(t *testing.T) {
 	fc := &faktorytest.FakeCompleter{
-		Facts: []string{"likes Go", "lives in Paris"},
+		Facts: []faktorytest.FactResult{{Text: "likes Go", Importance: 3}, {Text: "lives in Paris", Importance: 3}},
 		Reconcile: []faktorytest.ReconcileAction{
 			{ID: "0", Text: "likes Go", Event: "ADD"},
 			{ID: "1", Text: "lives in Paris", Event: "ADD"},
@@ -90,7 +90,7 @@ func TestSimilarityGateSkipsReconciliation(t *testing.T) {
 
 func TestSimilarityGateSendsHighSimilarityToReconciliation(t *testing.T) {
 	fc := &faktorytest.FakeCompleter{
-		Facts: []string{"likes Go"},
+		Facts: []faktorytest.FactResult{{Text: "likes Go", Importance: 3}},
 		Reconcile: []faktorytest.ReconcileAction{
 			{ID: "0", Text: "likes Go a lot", Event: "UPDATE"},
 		},
@@ -128,7 +128,7 @@ func TestSimilarityGateSendsHighSimilarityToReconciliation(t *testing.T) {
 func TestReconciliationContextCap(t *testing.T) {
 	// Create a FakeCompleter that extracts one fact and returns ADD for it.
 	fc := &faktorytest.FakeCompleter{
-		Facts: []string{"new fact"},
+		Facts: []faktorytest.FactResult{{Text: "new fact", Importance: 3}},
 		Reconcile: []faktorytest.ReconcileAction{
 			{ID: "0", Text: "new fact", Event: "ADD"},
 		},
@@ -193,9 +193,9 @@ func TestChunkedReconciliation(t *testing.T) {
 	const totalFacts = 25
 	const reconFacts = 15
 
-	var facts []string
+	var facts []faktorytest.FactResult
 	for i := 0; i < totalFacts; i++ {
-		facts = append(facts, fmt.Sprintf("fact-%d", i))
+		facts = append(facts, faktorytest.FactResult{Text: fmt.Sprintf("fact-%d", i), Importance: 3})
 	}
 
 	// ReconcileFunc parses the "New facts:" section from the user prompt and

@@ -8,12 +8,12 @@ import (
 
 func TestFakeCompleter_FactExtraction(t *testing.T) {
 	fc := &FakeCompleter{
-		Facts:  []string{"likes pizza", "lives in Paris"},
+		Facts:  []FactResult{{Text: "likes pizza", Importance: 3}, {Text: "lives in Paris", Importance: 4}},
 		Tokens: 42,
 	}
 
 	var result struct {
-		Facts []string `json:"facts"`
+		Facts []FactResult `json:"facts"`
 	}
 	tokens, err := fc.Complete(context.Background(), "system", "user", "fact_extraction", nil, &result)
 	if err != nil {
@@ -25,8 +25,8 @@ func TestFakeCompleter_FactExtraction(t *testing.T) {
 	if len(result.Facts) != 2 {
 		t.Fatalf("got %d facts, want 2", len(result.Facts))
 	}
-	if result.Facts[0] != "likes pizza" {
-		t.Errorf("fact[0] = %q, want %q", result.Facts[0], "likes pizza")
+	if result.Facts[0].Text != "likes pizza" {
+		t.Errorf("fact[0].Text = %q, want %q", result.Facts[0].Text, "likes pizza")
 	}
 }
 

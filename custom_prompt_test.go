@@ -31,14 +31,14 @@ func seedSimilarFact(t *testing.T, mem *Memory, userID, storedText, matchText st
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mem.store.InsertFact(userID, "", storedText, hashFact(storedText), emb); err != nil {
+	if _, err := mem.store.InsertFact(userID, "", storedText, hashFact(storedText), emb, 3); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func defaultFakeCompleter() *faktorytest.FakeCompleter {
 	return &faktorytest.FakeCompleter{
-		Facts: []string{"likes Go"},
+		Facts: []faktorytest.FactResult{{Text: "likes Go", Importance: 3}},
 		Reconcile: []faktorytest.ReconcileAction{
 			{ID: "0", Text: "likes Go", Event: "ADD"},
 		},

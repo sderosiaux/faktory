@@ -16,7 +16,7 @@ import (
 func newConcurrencyTestMemory(t *testing.T) *Memory {
 	t.Helper()
 	fc := &faktorytest.FakeCompleter{
-		Facts:     []string{"test fact"},
+		Facts:     []faktorytest.FactResult{{Text: "test fact", Importance: 3}},
 		Reconcile: []faktorytest.ReconcileAction{{ID: "0", Text: "test fact", Event: "ADD"}},
 		Entities:  []faktorytest.EntityResult{{Name: "Test", Type: "person"}},
 		Relations: []faktorytest.RelationResult{},
@@ -141,7 +141,7 @@ func TestConcurrentRecall_DuringAdd(t *testing.T) {
 	// Pre-seed a fact so Recall has something to find.
 	fe := &faktorytest.FakeEmbedder{Dim: 8}
 	emb, _ := fe.Embed(ctx, "seed fact")
-	if _, err := mem.store.InsertFact("u1", "", "seed fact", hashFact("seed fact"), emb); err != nil {
+	if _, err := mem.store.InsertFact("u1", "", "seed fact", hashFact("seed fact"), emb, 3); err != nil {
 		t.Fatal(err)
 	}
 
@@ -197,7 +197,7 @@ func TestConcurrentBumpAccess(t *testing.T) {
 	// Insert a fact to search for.
 	fe := &faktorytest.FakeEmbedder{Dim: 8}
 	emb, _ := fe.Embed(ctx, "bump target")
-	factID, err := mem.store.InsertFact("u1", "", "bump target", hashFact("bump target"), emb)
+	factID, err := mem.store.InsertFact("u1", "", "bump target", hashFact("bump target"), emb, 3)
 	if err != nil {
 		t.Fatal(err)
 	}

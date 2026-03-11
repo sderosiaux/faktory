@@ -30,6 +30,7 @@ type Fact struct {
 	CreatedAt   string  `json:"created_at"`
 	UpdatedAt   string  `json:"updated_at"`
 	AccessCount int     `json:"access_count,omitempty"`
+	Importance  int     `json:"importance,omitempty"`
 }
 
 // Relation is a stored entity-relation-entity triplet.
