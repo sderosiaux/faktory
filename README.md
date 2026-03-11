@@ -75,7 +75,7 @@ defer mem.Close()
 result, err := mem.Add(ctx, []faktory.Message{
     {Role: "user", Content: "I'm Alice, I live in Lyon, I work at Acme."},
 }, "alice")
-// result.Added, result.Updated, result.Deleted, result.Tokens
+// result.Added, result.Updated, result.Deleted, result.Tokens, result.TotalFacts
 
 // Namespace-scoped — isolate memories by project, tenant, or conversation
 result, err = mem.Add(ctx, messages, "alice", faktory.WithNamespace("project-x"))
@@ -233,7 +233,7 @@ Tools: `memory_add`, `memory_recall`, `memory_search`, `memory_profile`, `memory
 - **Go library first** — CLI and MCP are secondary. The primary interface is `faktory.New()` + `Add()` + `Recall()`
 - **SQLite + sqlite-vec** — Zero dependencies. Single file. Portable. No server to run
 - **OpenAI-compatible only** — One HTTP client covers every provider
-- **3 LLM calls per Add()** — Extract + reconcile + graph. This is the minimum for reliable memory
+- **2-3 LLM calls per Add()** — Extract + reconcile + graph. Novel facts (no similar existing) skip reconciliation (2 calls). `DisableGraph: true` drops to 1-2
 - **Integer ID mapping** — UUIDs mapped to sequential ints before sending to the reconciliation LLM. Prevents hallucinated IDs
 - **Configurable decay** — α=0.01, β=0.1 defaults. Override via `DecayAlpha`/`DecayBeta` in Config. Recent and frequently accessed facts rank higher
 - **KNN over-fetch** — sqlite-vec KNN is global (no per-user partition). We over-fetch 20x then post-filter by user_id. Works well up to ~50K total facts; beyond that, consider sharding by user into separate DBs
@@ -248,7 +248,10 @@ Tools: `memory_add`, `memory_recall`, `memory_search`, `memory_profile`, `memory
 
 ```bash
 go test ./...                           # unit tests only (free, no API calls)
-go test -tags=integration ./...         # unit + integration + quality (requires OPENAI_API_KEY)
+go test -bench=. ./...                  # benchmarks (Add, Search, Recall, ApplyDecay)
+go test -tags=integration ./...         # unit + integration + quality + adversarial (requires OPENAI_API_KEY)
+go test -tags=integration -run=TestAdversarial_Report ./...  # adversarial suite only
+go test -tags=integration -run=TestQuality_Report ./...      # quality report only
 ```
 
 ## License
