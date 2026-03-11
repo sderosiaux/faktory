@@ -74,6 +74,25 @@ resolved_text: "Alice has a cat named Mochi. Alice's boyfriend Tom is allergic t
 entities: Alice (person), Mochi (other), Tom (person), Figma (organization), Python (product), Rust (product)
 relations: Alice owns Mochi, Alice partner_of Tom, Tom allergic_to cats, Tom works_at Figma, Alice uses Python, Alice uses Rust`
 
+const sessionSummaryPrompt = `Summarize the following conversation into 2-3 sentences.
+Focus on: what was discussed, key decisions made, action items, and notable information shared.
+Write from the perspective of what the user shared or asked about.
+Use the same language as the conversation.`
+
+var sessionSummarySchema = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "summary": {"type": "string"}
+  },
+  "required": ["summary"],
+  "additionalProperties": false
+}`)
+
+// SessionSummaryResult is the structured output from session summary generation.
+type SessionSummaryResult struct {
+	Summary string `json:"summary"`
+}
+
 const profileGenerationPrompt = `Summarize everything known about this user into a concise profile.
 
 Group by: personal details, work/education, preferences, relationships, plans.
@@ -215,3 +234,28 @@ var entityExtractionSchema = json.RawMessage(`{
   "required": ["resolved_text", "entities", "relations"],
   "additionalProperties": false
 }`)
+
+
+// --- Rerank ---
+
+const rerankPrompt = `Given a query and a list of facts, re-rank the facts by relevance to the query.
+Return the fact IDs in order from most relevant to least relevant.
+Only include facts that are actually relevant to the query. Omit irrelevant facts.`
+
+var rerankSchema = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "ranked_ids": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Fact IDs ordered by relevance, most relevant first"
+    }
+  },
+  "required": ["ranked_ids"],
+  "additionalProperties": false
+}`)
+
+// RerankResult holds the LLM response for re-ranking.
+type RerankResult struct {
+	RankedIDs []string `json:"ranked_ids"`
+}

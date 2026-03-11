@@ -638,6 +638,10 @@ func (m *Memory) Recall(ctx context.Context, query string, userID string, opts *
 		facts = facts[:maxFacts]
 	}
 
+	if opts != nil && opts.Rerank && len(facts) > 0 {
+		facts, _ = m.rerankFacts(ctx, query, facts)
+	}
+
 	factIDs := make([]string, len(facts))
 	for i, f := range facts {
 		factIDs[i] = f.ID
@@ -690,6 +694,51 @@ func (m *Memory) Recall(ctx context.Context, query string, userID string, opts *
 		Relations: rels,
 		Summary:   sb.String(),
 	}, nil
+}
+
+// rerankFacts asks the LLM to reorder facts by relevance to query.
+// On error, it silently returns the original order.
+func (m *Memory) rerankFacts(ctx context.Context, query string, facts []Fact) ([]Fact, error) {
+	if len(facts) == 0 {
+		return facts, nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString("Query: ")
+	sb.WriteString(query)
+	sb.WriteString("\n\nFacts:\n")
+	for _, f := range facts {
+		fmt.Fprintf(&sb, "- [%s] %s\n", f.ID, f.Text)
+	}
+
+	var result RerankResult
+	_, err := m.llm.Complete(ctx, rerankPrompt, sb.String(), "rerank", rerankSchema, &result)
+	if err != nil {
+		m.log.Warn("rerank LLM error, using original order", "err", err)
+		return facts, nil
+	}
+
+	factByID := make(map[string]Fact, len(facts))
+	for _, f := range facts {
+		factByID[f.ID] = f
+	}
+
+	var reranked []Fact
+	seen := make(map[string]bool)
+	for _, id := range result.RankedIDs {
+		if f, ok := factByID[id]; ok && !seen[id] {
+			reranked = append(reranked, f)
+			seen[id] = true
+		}
+	}
+	// Append any facts the LLM missed (safety net)
+	for _, f := range facts {
+		if !seen[f.ID] {
+			reranked = append(reranked, f)
+		}
+	}
+
+	return reranked, nil
 }
 
 // --- Profile ---

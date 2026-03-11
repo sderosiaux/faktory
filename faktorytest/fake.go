@@ -44,8 +44,10 @@ type FakeCompleter struct {
 	ReconcileFunc func(userPrompt string) []ReconcileAction // dynamic reconciliation (overrides Reconcile when set)
 	Entities      []EntityResult
 	Relations     []RelationResult
+	RerankIDs     []string         // IDs to return from rerank; nil = empty list (fallback to original order)
 	Tokens        int
-	Errors        map[string]error // schemaName -> error to return (before normal routing)
+	Errors         map[string]error // schemaName -> error to return (before normal routing)
+	SessionSummary string           // Custom summary text for session_summary schema
 
 	mu            sync.Mutex
 	SystemPrompts map[string]string // schemaName -> system prompt received
@@ -123,6 +125,12 @@ func (fc *FakeCompleter) Complete(_ context.Context, system, user string, schema
 		}
 	case "profile":
 		payload = map[string]any{"profile": "fake profile"}
+	case "rerank":
+		ids := fc.RerankIDs
+		if ids == nil {
+			ids = []string{}
+		}
+		payload = map[string]any{"ranked_ids": ids}
 	default:
 		return 0, fmt.Errorf("unknown schema: %s", schemaName)
 	}

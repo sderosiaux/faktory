@@ -121,6 +121,7 @@ type RecallOptions struct {
 	MaxRelations   int    `json:"max_relations,omitempty"`
 	IncludeProfile bool   `json:"include_profile,omitempty"`
 	Namespace      string `json:"namespace,omitempty"`
+	Rerank         bool   `json:"rerank,omitempty"` // LLM re-rank retrieved facts (adds 1 LLM call)
 }
 
 // RecallResult combines facts and relations into a single response
