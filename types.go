@@ -164,6 +164,7 @@ type Config struct {
 
 	DecayAlpha float64 // Age decay rate (default: 0.01). Higher = faster decay of old facts.
 	DecayBeta  float64 // Access boost rate (default: 0.1). Higher = stronger boost for frequently accessed facts.
+	BM25Weight float64 // Weight for BM25 in hybrid score fusion (default: 0.3). 0 = vector only, 1 = BM25 only.
 
 	PromptFactExtraction   string // Override fact extraction system prompt
 	PromptReconciliation   string // Override reconciliation system prompt
@@ -207,6 +208,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.DecayBeta == 0 {
 		c.DecayBeta = 0.1
+	}
+	if c.BM25Weight == 0 {
+		c.BM25Weight = 0.3
 	}
 	if c.Logger == nil {
 		c.Logger = nopLogger()

@@ -411,6 +411,12 @@ func (m *Memory) Search(ctx context.Context, query string, userID string, limit 
 		return nil, err
 	}
 
+	// BM25 hybrid: fuse vector results with full-text keyword matches
+	bm25Facts, _ := m.store.SearchFactsBM25(query, userID, o.namespace, limit*2)
+	if len(bm25Facts) > 0 {
+		facts = fuseScores(facts, bm25Facts, m.cfg.BM25Weight)
+	}
+
 	applyDecay(facts, m.cfg.DecayAlpha, m.cfg.DecayBeta)
 	if len(facts) > limit {
 		facts = facts[:limit]

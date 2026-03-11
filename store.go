@@ -130,6 +130,12 @@ func OpenStore(dbPath string, dimension int) (*Store, error) {
 		}
 	}
 
+	// FTS5 full-text index for BM25 hybrid retrieval (graceful no-op if FTS5 unavailable)
+	if err := migrateFTS5(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate fts5: %w", err)
+	}
+
 	return &Store{db: db, dimension: dimension}, nil
 }
 
