@@ -90,8 +90,9 @@ result, err = mem.Add(ctx, messages, "alice", faktory.WithNamespace("project-x")
 recall, err := mem.Recall(ctx, "where does alice work?", "alice", &faktory.RecallOptions{
     MaxFacts:       10,
     MaxRelations:   10,
-    IncludeProfile: true,      // prepend cached user profile
+    IncludeProfile: true,        // prepend cached user profile
     Namespace:      "project-x", // scope to namespace (empty = all)
+    MinConfidence:  3,           // only facts with confidence >= 3 (requires EnableQualifiers)
 })
 // recall.Facts, recall.Relations, recall.Summary (pre-formatted for system prompt)
 
@@ -144,10 +145,11 @@ messages ─┬─→ [Fact Pipeline]  ──→ facts + embeddings in SQLite
 
 **Recall:**
 1. Embed query once, run parallel KNN on facts and entity embeddings
-2. Re-rank facts with temporal decay: `score = similarity * (1/(1+0.01*age_days)) * (1+0.1*ln(1+access_count))`
-3. Expand relations via BFS (up to 2 hops from matched entities with similarity > 0.5)
-4. Optionally prepend a cached user profile (LLM-generated summary of all facts)
-5. Return structured data + pre-formatted summary ready for system prompt injection
+2. Filter by `MinConfidence` if set (qualifier metadata layer)
+3. Re-rank facts with temporal decay: `score = similarity * (1/(1+0.01*age_days)) * (1+0.1*ln(1+access_count))`
+4. Expand relations via BFS (up to 2 hops from matched entities with similarity > 0.5)
+5. Optionally prepend a cached user profile (LLM-generated summary of all facts)
+6. Return structured data + pre-formatted summary (with qualifier annotations when present)
 
 ## Configuration
 
@@ -170,6 +172,8 @@ faktory.Config{
     PromptFactExtraction:   "",  // fact extraction (empty = default)
     PromptReconciliation:   "",  // fact reconciliation (empty = default)
     PromptEntityExtraction: "",  // entity + relation extraction (empty = default)
+
+    EnableQualifiers: false, // extract source/confidence metadata per fact (default off)
 }
 ```
 
@@ -243,6 +247,7 @@ Tools: `memory_add`, `memory_recall`, `memory_search`, `memory_profile`, `memory
 - **Custom prompts over plugins** — Override extraction/reconciliation prompts via Config for domain tuning. No plugin system needed
 - **256-dim default** — text-embedding-3-small supports Matryoshka truncation. 256 dimensions retain quality for short fact strings with 6x less storage. Override with `EmbedDimension: 1536` if needed
 - **Namespace scoping** — Per-call `WithNamespace()` adds a second isolation dimension beyond user_id
+- **Qualifier metadata over hyper-edges** — Research (10 arxiv papers) shows hyper-edges add only +1.5% retrieval accuracy while embedding qualifiers into vectors hurts performance. Instead, `source` and `confidence` are flat SQL columns on the facts table, enabling `WHERE confidence >= ?` filtering. Gated behind `EnableQualifiers` to keep extraction simple by default
 
 ## Testing
 
