@@ -361,6 +361,12 @@ func (m *Memory) addGraph(ctx context.Context, messages []Message, userID, names
 				return tokens, nil, nil, fmt.Errorf("store entity embedding %q: %w", entNames[i], err)
 			}
 		}
+		// Assign entity clusters based on embedding similarity
+		for i, id := range entIDs {
+			if err := m.store.AssignCluster(id, userID, namespace, entEmbs[i], 0.6); err != nil {
+				m.log.Warn("cluster assignment failed", "entity", entNames[i], "err", err)
+			}
+		}
 	}
 
 	// Upsert relations
@@ -625,6 +631,14 @@ func (m *Memory) Recall(ctx context.Context, query string, userID string, opts *
 		entityIDs, relErr = m.store.SearchEntityIDs(emb, userID, ns, 10, 0.5)
 	}()
 	wg.Wait()
+
+	// Expand matched entities to their clusters before BFS
+	if len(entityIDs) > 0 {
+		clusterIDs, clErr := m.store.GetClusterEntityIDs(entityIDs, userID, ns)
+		if clErr == nil && len(clusterIDs) > len(entityIDs) {
+			entityIDs = clusterIDs
+		}
+	}
 
 	if factErr != nil {
 		return nil, fmt.Errorf("search facts: %w", factErr)

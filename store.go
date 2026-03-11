@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS entities (
     namespace  TEXT NOT NULL DEFAULT '',
     name       TEXT NOT NULL,
     type       TEXT NOT NULL,
+    cluster_id INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE(user_id, namespace, name, type)
@@ -58,6 +59,7 @@ CREATE INDEX IF NOT EXISTS idx_facts_hash ON facts(user_id, hash);
 CREATE INDEX IF NOT EXISTS idx_facts_user_ns ON facts(user_id, namespace);
 CREATE INDEX IF NOT EXISTS idx_entities_user ON entities(user_id);
 CREATE INDEX IF NOT EXISTS idx_entities_user_ns ON entities(user_id, namespace);
+CREATE INDEX IF NOT EXISTS idx_entities_cluster ON entities(user_id, namespace, cluster_id);
 CREATE INDEX IF NOT EXISTS idx_relations_user ON relations(user_id);
 CREATE INDEX IF NOT EXISTS idx_relations_user_ns ON relations(user_id, namespace);
 CREATE INDEX IF NOT EXISTS idx_relations_source ON relations(source_id);
@@ -121,6 +123,10 @@ func OpenStore(dbPath string, dimension int) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate schema: %w", err)
 	}
+
+	// Additive migration: cluster_id column (safe no-op on fresh DBs)
+	db.Exec("ALTER TABLE entities ADD COLUMN cluster_id INTEGER NOT NULL DEFAULT 0")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_entities_cluster ON entities(user_id, namespace, cluster_id)")
 
 	// Create vec0 virtual tables
 	for _, tbl := range []string{"fact_embeddings", "entity_embeddings"} {
