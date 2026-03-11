@@ -465,7 +465,8 @@ func (m *Memory) Update(ctx context.Context, factID string, text string) error {
 	if err != nil {
 		return fmt.Errorf("embed updated text: %w", err)
 	}
-	return m.store.UpdateFact(factID, text, hashFact(text), emb)
+	_, err = m.store.UpdateFact(factID, text, hashFact(text), emb)
+	return err
 }
 
 // Delete removes a single fact and its embedding.
@@ -476,6 +477,12 @@ func (m *Memory) Delete(ctx context.Context, factID string) error {
 // History returns all history entries for a fact, newest first.
 func (m *Memory) History(_ context.Context, factID string) ([]FactHistoryEntry, error) {
 	return m.store.GetFactHistory(factID)
+}
+
+// HistoryAt returns facts that were valid at the given point in time.
+func (m *Memory) HistoryAt(_ context.Context, userID string, at time.Time, opts ...Option) ([]Fact, error) {
+	o := resolveOpts(opts)
+	return m.store.GetFactsAt(userID, o.namespace, at, 200)
 }
 
 // Undo reverses the latest mutation on a fact.
@@ -506,7 +513,7 @@ func (m *Memory) Undo(ctx context.Context, factID string) error {
 		if err != nil {
 			return fmt.Errorf("embed restored text: %w", err)
 		}
-		if err := m.store.UpdateFact(factID, entry.OldText, hashFact(entry.OldText), emb); err != nil {
+		if _, err := m.store.UpdateFact(factID, entry.OldText, hashFact(entry.OldText), emb); err != nil {
 			return fmt.Errorf("restore fact: %w", err)
 		}
 

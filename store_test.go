@@ -100,13 +100,19 @@ func TestUpdateFact(t *testing.T) {
 	id, _ := s.InsertFact("alice", "", "lives in Paris", "hp", emb, 3)
 
 	newEmb := []float32{0.5, 0.6, 0.7, 0.8}
-	if err := s.UpdateFact(id, "lives in Lyon", "hl", newEmb); err != nil {
+	newID, err := s.UpdateFact(id, "lives in Lyon", "hl", newEmb)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	got, _ := s.GetFact(id)
+	got, _ := s.GetFact(newID)
 	if got.Text != "lives in Lyon" {
 		t.Errorf("text = %q, want %q", got.Text, "lives in Lyon")
+	}
+	// Old version should not be visible
+	old, _ := s.GetFact(id)
+	if old != nil {
+		t.Error("old version should be soft-invalidated")
 	}
 }
 

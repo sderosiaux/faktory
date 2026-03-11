@@ -139,7 +139,7 @@ func TestBM25_FTSTriggersSync(t *testing.T) {
 		t.Fatalf("after insert: expected 1 result, got %d", len(results))
 	}
 
-	s.UpdateFact(id, "updated keyword marimba", "h2", []float32{1, 0, 0, 0})
+	newID, _ := s.UpdateFact(id, "updated keyword marimba", "h2", []float32{1, 0, 0, 0})
 
 	results, _ = s.SearchFactsBM25("xylophone", "alice", "", 10)
 	if len(results) != 0 {
@@ -151,7 +151,7 @@ func TestBM25_FTSTriggersSync(t *testing.T) {
 		t.Errorf("after update: new keyword not found, got %d results", len(results))
 	}
 
-	s.DeleteFact(id)
+	s.DeleteFact(newID)
 	results, _ = s.SearchFactsBM25("marimba", "alice", "", 10)
 	if len(results) != 0 {
 		t.Errorf("after delete: keyword still found, got %d results", len(results))

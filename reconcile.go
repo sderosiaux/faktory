@@ -152,10 +152,11 @@ func (m *Memory) reconcileChunk(ctx context.Context, candidates []candidateFact,
 			if err != nil {
 				return nil, fmt.Errorf("embed updated fact: %w", err)
 			}
-			if err := m.store.UpdateFact(realID, action.Text, hashFact(action.Text), emb); err != nil {
+			updatedID, err := m.store.UpdateFact(realID, action.Text, hashFact(action.Text), emb)
+			if err != nil {
 				return nil, fmt.Errorf("update fact: %w", err)
 			}
-			res.updated = append(res.updated, Fact{ID: realID, Text: action.Text, UserID: userID})
+			res.updated = append(res.updated, Fact{ID: updatedID, Text: action.Text, UserID: userID})
 
 		case "DELETE":
 			realID, ok := intToID[action.ID]

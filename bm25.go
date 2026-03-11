@@ -85,6 +85,7 @@ func (s *Store) SearchFactsBM25(query, userID, namespace string, limit int) ([]F
 		WHERE facts_fts MATCH ?
 		  AND fts.user_id = ?
 		  AND fts.namespace = ?
+		  AND f.invalid_at IS NULL
 		ORDER BY rank
 		LIMIT ?
 	`, query, userID, namespace, limit)

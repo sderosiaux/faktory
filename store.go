@@ -145,6 +145,20 @@ func OpenStore(dbPath string, dimension int) (*Store, error) {
 		}
 	}
 
+	// Additive migration: bi-temporal columns
+	if _, err := db.Exec("ALTER TABLE facts ADD COLUMN valid_from TEXT NOT NULL DEFAULT ''"); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column") {
+			db.Close()
+			return nil, fmt.Errorf("migrate valid_from: %w", err)
+		}
+	}
+	if _, err := db.Exec("ALTER TABLE facts ADD COLUMN invalid_at TEXT"); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column") {
+			db.Close()
+			return nil, fmt.Errorf("migrate invalid_at: %w", err)
+		}
+	}
+
 	return &Store{db: db, dimension: dimension}, nil
 }
 
@@ -153,7 +167,7 @@ func (s *Store) Close() error {
 }
 
 func now() string {
-	return time.Now().UTC().Format(time.RFC3339)
+	return time.Now().UTC().Format(time.RFC3339Nano)
 }
 
 func newID() string {
@@ -174,8 +188,8 @@ func (s *Store) InsertFact(userID, namespace, text, hash string, embedding []flo
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec("INSERT INTO facts (id, user_id, namespace, text, hash, importance, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-		id, userID, namespace, text, hash, importance, ts, ts); err != nil {
+	if _, err := tx.Exec("INSERT INTO facts (id, user_id, namespace, text, hash, importance, created_at, updated_at, valid_from) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		id, userID, namespace, text, hash, importance, ts, ts, ts); err != nil {
 		return "", fmt.Errorf("insert fact: %w", err)
 	}
 
@@ -196,43 +210,53 @@ func (s *Store) InsertFact(userID, namespace, text, hash string, embedding []flo
 	return id, tx.Commit()
 }
 
-func (s *Store) UpdateFact(id, text, hash string, embedding []float32) error {
+func (s *Store) UpdateFact(id, text, hash string, embedding []float32) (string, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer tx.Rollback()
 
 	// Capture current state for history
-	var oldText, oldHash, userID string
-	if err := tx.QueryRow("SELECT user_id, text, hash FROM facts WHERE id = ?", id).Scan(&userID, &oldText, &oldHash); err != nil {
-		return fmt.Errorf("read current fact: %w", err)
+	var oldText, oldHash, userID, namespace string
+	var importance int
+	if err := tx.QueryRow("SELECT user_id, namespace, text, hash, importance FROM facts WHERE id = ?", id).Scan(&userID, &namespace, &oldText, &oldHash, &importance); err != nil {
+		return "", fmt.Errorf("read current fact: %w", err)
 	}
 
 	ts := now()
-	if _, err := tx.Exec("UPDATE facts SET text = ?, hash = ?, updated_at = ? WHERE id = ?", text, hash, ts, id); err != nil {
-		return fmt.Errorf("update fact: %w", err)
+
+	// Soft-invalidate old version
+	if _, err := tx.Exec("UPDATE facts SET invalid_at = ? WHERE id = ?", ts, id); err != nil {
+		return "", fmt.Errorf("invalidate old fact: %w", err)
+	}
+	// Remove old embedding from vec0
+	if _, err := tx.Exec("DELETE FROM fact_embeddings WHERE id = ?", id); err != nil {
+		return "", fmt.Errorf("delete old embedding: %w", err)
 	}
 
-	if _, err := tx.Exec("DELETE FROM fact_embeddings WHERE id = ?", id); err != nil {
-		return fmt.Errorf("delete old embedding: %w", err)
+	// Create new version
+	vid := newID()
+	if _, err := tx.Exec("INSERT INTO facts (id, user_id, namespace, text, hash, importance, created_at, updated_at, valid_from) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		vid, userID, namespace, text, hash, importance, ts, ts, ts); err != nil {
+		return "", fmt.Errorf("insert new version: %w", err)
 	}
 
 	embJSON, err := json.Marshal(embedding)
 	if err != nil {
-		return err
+		return "", err
 	}
-	if _, err := tx.Exec("INSERT INTO fact_embeddings (id, embedding) VALUES (?, ?)", id, string(embJSON)); err != nil {
-		return fmt.Errorf("insert new embedding: %w", err)
+	if _, err := tx.Exec("INSERT INTO fact_embeddings (id, embedding) VALUES (?, ?)", vid, string(embJSON)); err != nil {
+		return "", fmt.Errorf("insert new embedding: %w", err)
 	}
 
 	if _, err := tx.Exec(
-		"INSERT INTO fact_history (id, fact_id, user_id, event, old_text, new_text, old_hash, new_hash, created_at) VALUES (?, ?, ?, 'UPDATE', ?, ?, ?, ?, ?)",
-		newID(), id, userID, oldText, text, oldHash, hash, ts); err != nil {
-		return fmt.Errorf("record history: %w", err)
+		"INSERT INTO fact_history (id, fact_id, user_id, namespace, event, old_text, new_text, old_hash, new_hash, created_at) VALUES (?, ?, ?, ?, 'UPDATE', ?, ?, ?, ?, ?)",
+		newID(), vid, userID, namespace, oldText, text, oldHash, hash, ts); err != nil {
+		return "", fmt.Errorf("record history: %w", err)
 	}
 
-	return tx.Commit()
+	return vid, tx.Commit()
 }
 
 func (s *Store) DeleteFact(id string) error {
@@ -248,14 +272,15 @@ func (s *Store) DeleteFact(id string) error {
 		return fmt.Errorf("read current fact: %w", err)
 	}
 
+	ts := now()
+	// Soft-delete: set invalid_at, remove embedding from vec0
+	if _, err := tx.Exec("UPDATE facts SET invalid_at = ? WHERE id = ?", ts, id); err != nil {
+		return fmt.Errorf("soft-delete fact: %w", err)
+	}
 	if _, err := tx.Exec("DELETE FROM fact_embeddings WHERE id = ?", id); err != nil {
 		return fmt.Errorf("delete embedding: %w", err)
 	}
-	if _, err := tx.Exec("DELETE FROM facts WHERE id = ?", id); err != nil {
-		return fmt.Errorf("delete fact: %w", err)
-	}
 
-	ts := now()
 	if _, err := tx.Exec(
 		"INSERT INTO fact_history (id, fact_id, user_id, event, old_text, old_hash, created_at) VALUES (?, ?, ?, 'DELETE', ?, ?, ?)",
 		newID(), id, userID, oldText, oldHash, ts); err != nil {
@@ -267,8 +292,8 @@ func (s *Store) DeleteFact(id string) error {
 
 func (s *Store) GetFact(id string) (*Fact, error) {
 	var f Fact
-	err := s.db.QueryRow("SELECT id, user_id, text, hash, created_at, updated_at, access_count, importance FROM facts WHERE id = ?", id).
-		Scan(&f.ID, &f.UserID, &f.Text, &f.Hash, &f.CreatedAt, &f.UpdatedAt, &f.AccessCount, &f.Importance)
+	err := s.db.QueryRow("SELECT id, user_id, text, hash, created_at, updated_at, access_count, importance, COALESCE(valid_from,''), COALESCE(invalid_at,'') FROM facts WHERE id = ? AND invalid_at IS NULL", id).
+		Scan(&f.ID, &f.UserID, &f.Text, &f.Hash, &f.CreatedAt, &f.UpdatedAt, &f.AccessCount, &f.Importance, &f.ValidFrom, &f.InvalidAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -278,7 +303,7 @@ func (s *Store) GetFact(id string) (*Fact, error) {
 	return &f, nil
 }
 
-// ReinsertFact re-inserts a fact with a specific ID (used by Undo after DELETE).
+// ReinsertFact restores a soft-deleted fact by clearing invalid_at, or inserts fresh.
 func (s *Store) ReinsertFact(id, userID, text, hash string, embedding []float32, importance int) error {
 	if importance <= 0 || importance > 5 {
 		importance = 3
@@ -290,9 +315,23 @@ func (s *Store) ReinsertFact(id, userID, text, hash string, embedding []float32,
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec("INSERT INTO facts (id, user_id, text, hash, importance, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		id, userID, text, hash, importance, ts, ts); err != nil {
-		return fmt.Errorf("reinsert fact: %w", err)
+	// Check if the row exists (soft-deleted)
+	var count int
+	if err := tx.QueryRow("SELECT COUNT(*) FROM facts WHERE id = ?", id).Scan(&count); err != nil {
+		return err
+	}
+
+	if count > 0 {
+		// Row exists (soft-deleted) — restore it
+		if _, err := tx.Exec("UPDATE facts SET text = ?, hash = ?, importance = ?, updated_at = ?, invalid_at = NULL, valid_from = ? WHERE id = ?",
+			text, hash, importance, ts, ts, id); err != nil {
+			return fmt.Errorf("restore fact: %w", err)
+		}
+	} else {
+		if _, err := tx.Exec("INSERT INTO facts (id, user_id, text, hash, importance, created_at, updated_at, valid_from) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+			id, userID, text, hash, importance, ts, ts, ts); err != nil {
+			return fmt.Errorf("reinsert fact: %w", err)
+		}
 	}
 
 	embJSON, err := json.Marshal(embedding)
@@ -346,7 +385,7 @@ func (s *Store) GetLatestHistoryEntry(factID string) (*FactHistoryEntry, error) 
 func (s *Store) PruneHistoryForUser(userID, namespace string, cutoff time.Time) (int, error) {
 	res, err := s.db.Exec(
 		"DELETE FROM fact_history WHERE user_id = ? AND namespace = ? AND created_at < ?",
-		userID, namespace, cutoff.UTC().Format(time.RFC3339))
+		userID, namespace, cutoff.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return 0, err
 	}
@@ -376,12 +415,12 @@ func (s *Store) BumpAccess(ids []string) error {
 // CountFacts returns the total number of facts for a user+namespace.
 func (s *Store) CountFacts(userID, namespace string) (int, error) {
 	var count int
-	err := s.db.QueryRow("SELECT COUNT(*) FROM facts WHERE user_id = ? AND namespace = ?", userID, namespace).Scan(&count)
+	err := s.db.QueryRow("SELECT COUNT(*) FROM facts WHERE user_id = ? AND namespace = ? AND invalid_at IS NULL", userID, namespace).Scan(&count)
 	return count, err
 }
 
 func (s *Store) GetAllFacts(userID, namespace string, limit int) ([]Fact, error) {
-	rows, err := s.db.Query("SELECT id, user_id, text, hash, created_at, updated_at, access_count, importance FROM facts WHERE user_id = ? AND namespace = ? ORDER BY created_at DESC LIMIT ?", userID, namespace, limit)
+	rows, err := s.db.Query("SELECT id, user_id, text, hash, created_at, updated_at, access_count, importance FROM facts WHERE user_id = ? AND namespace = ? AND invalid_at IS NULL ORDER BY created_at DESC LIMIT ?", userID, namespace, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -419,6 +458,7 @@ func (s *Store) SearchFacts(queryEmbedding []float32, userID, namespace string, 
 		  AND k = ?
 		  AND f.user_id = ?
 		  AND f.namespace = ?
+		  AND f.invalid_at IS NULL
 		ORDER BY e.distance
 		LIMIT ?
 	`, string(embJSON), kFetch, userID, namespace, limit)
@@ -442,7 +482,7 @@ func (s *Store) SearchFacts(queryEmbedding []float32, userID, namespace string, 
 
 func (s *Store) FactExistsByHash(userID, namespace, hash string) (bool, error) {
 	var count int
-	err := s.db.QueryRow("SELECT COUNT(*) FROM facts WHERE user_id = ? AND namespace = ? AND hash = ?", userID, namespace, hash).Scan(&count)
+	err := s.db.QueryRow("SELECT COUNT(*) FROM facts WHERE user_id = ? AND namespace = ? AND hash = ? AND invalid_at IS NULL", userID, namespace, hash).Scan(&count)
 	return count > 0, err
 }
 
@@ -561,7 +601,7 @@ func (s *Store) CleanupStaleRelations(userID, namespace string, deletedTexts []s
 
 		var count int
 		err := s.db.QueryRow(
-			"SELECT COUNT(*) FROM facts WHERE user_id = ? AND namespace = ? AND LOWER(text) LIKE '%' || ? || '%'",
+			"SELECT COUNT(*) FROM facts WHERE user_id = ? AND namespace = ? AND invalid_at IS NULL AND LOWER(text) LIKE '%' || ? || '%'",
 			userID, namespace, strings.ToLower(e.Name),
 		).Scan(&count)
 		if err != nil {

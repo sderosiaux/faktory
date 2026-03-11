@@ -50,19 +50,20 @@ func TestUpdateFactCreatesHistoryEntry(t *testing.T) {
 	}
 
 	newEmb := []float32{0.5, 0.6, 0.7, 0.8}
-	if err := s.UpdateFact(id, "lives in Lyon", "hl", newEmb); err != nil {
-		t.Fatal(err)
-	}
-
-	history, err := s.GetFactHistory(id)
+	newID, err := s.UpdateFact(id, "lives in Lyon", "hl", newEmb)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(history) != 2 {
-		t.Fatalf("expected 2 history entries, got %d", len(history))
+
+	// New version has its own history (1 UPDATE entry)
+	history, err := s.GetFactHistory(newID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 1 {
+		t.Fatalf("expected 1 history entry for new version, got %d", len(history))
 	}
 
-	// Newest first
 	h := history[0]
 	if h.Event != "UPDATE" {
 		t.Errorf("event = %q, want UPDATE", h.Event)
@@ -113,25 +114,28 @@ func TestGetFactHistoryNewestFirst(t *testing.T) {
 
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
 	id, _ := s.InsertFact("alice", "", "v1", "h1", emb, 3)
-	s.UpdateFact(id, "v2", "h2", emb)
-	s.UpdateFact(id, "v3", "h3", emb)
+	id2, _ := s.UpdateFact(id, "v2", "h2", emb)
+	id3, _ := s.UpdateFact(id2, "v3", "h3", emb)
 
-	history, err := s.GetFactHistory(id)
+	// Each version has its own history; latest version has 1 entry
+	history, err := s.GetFactHistory(id3)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(history) != 3 {
-		t.Fatalf("expected 3 history entries, got %d", len(history))
+	if len(history) != 1 {
+		t.Fatalf("expected 1 history entry for latest version, got %d", len(history))
 	}
-	// Newest first: UPDATE(v3), UPDATE(v2), ADD(v1)
 	if history[0].Event != "UPDATE" || history[0].NewText != "v3" {
 		t.Errorf("entry[0]: event=%q new_text=%q", history[0].Event, history[0].NewText)
 	}
-	if history[1].Event != "UPDATE" || history[1].NewText != "v2" {
-		t.Errorf("entry[1]: event=%q new_text=%q", history[1].Event, history[1].NewText)
+
+	// Original version has ADD entry
+	origHistory, _ := s.GetFactHistory(id)
+	if len(origHistory) != 1 {
+		t.Fatalf("expected 1 history entry for original, got %d", len(origHistory))
 	}
-	if history[2].Event != "ADD" || history[2].NewText != "v1" {
-		t.Errorf("entry[2]: event=%q new_text=%q", history[2].Event, history[2].NewText)
+	if origHistory[0].Event != "ADD" {
+		t.Errorf("original entry: event=%q, want ADD", origHistory[0].Event)
 	}
 }
 
@@ -217,21 +221,27 @@ func TestUndoAfterUpdate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := m.store.UpdateFact(id, "lives in Lyon", hashFact("lives in Lyon"), emb); err != nil {
+	newID, err := m.store.UpdateFact(id, "lives in Lyon", hashFact("lives in Lyon"), emb)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Undo the update
-	if err := m.Undo(ctx, id); err != nil {
+	// Undo the update on the new version
+	if err := m.Undo(ctx, newID); err != nil {
 		t.Fatal(err)
 	}
 
-	got, _ := m.store.GetFact(id)
-	if got == nil {
-		t.Fatal("fact should exist after undo")
+	// After undo, there should be a live fact with "lives in Paris"
+	facts, _ := m.store.GetAllFacts("alice", "", 100)
+	found := false
+	for _, f := range facts {
+		if f.Text == "lives in Paris" {
+			found = true
+			break
+		}
 	}
-	if got.Text != "lives in Paris" {
-		t.Errorf("restored text = %q, want %q", got.Text, "lives in Paris")
+	if !found {
+		t.Errorf("expected to find 'lives in Paris' after undo, got %v", facts)
 	}
 }
 
@@ -323,9 +333,9 @@ func TestGetLatestHistoryEntry(t *testing.T) {
 
 	emb := []float32{0.1, 0.2, 0.3, 0.4}
 	id, _ := s.InsertFact("alice", "", "v1", "h1", emb, 3)
-	s.UpdateFact(id, "v2", "h2", emb)
+	id2, _ := s.UpdateFact(id, "v2", "h2", emb)
 
-	entry, err := s.GetLatestHistoryEntry(id)
+	entry, err := s.GetLatestHistoryEntry(id2)
 	if err != nil {
 		t.Fatal(err)
 	}
