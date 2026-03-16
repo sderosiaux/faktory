@@ -165,14 +165,23 @@ Configured via TOML config file or environment variables. Run in background goro
 
 ```toml
 [daemon]
-listen = ":8420"
+listen = "127.0.0.1:8420"     # localhost only by default
+api_key = ""                   # set to require Bearer auth on all requests
 
 [faktory]
 db_path = "faktory.db"
 llm_api_key = "sk-..."
+llm_base_url = "https://api.openai.com/v1"
 llm_model = "gpt-4o-mini"
 embed_model = "text-embedding-3-small"
 embed_dimension = 256
+disable_graph = false
+enable_qualifiers = false
+
+# Custom prompts — override for domain-specific tuning
+# prompt_fact_extraction = ""
+# prompt_reconciliation = ""
+# prompt_entity_extraction = ""
 
 [policies.prune]
 enabled = true
@@ -190,6 +199,8 @@ enabled = false
 max_summaries = 10       # merge oldest when count exceeds this (future)
 ```
 
+All `[faktory]` fields can be overridden via env vars: `FAKTORY_API_KEY`, `FAKTORY_BASE_URL`, `FAKTORY_MODEL`, etc. `[daemon]` fields via `FAKTORY_DAEMON_LISTEN`, `FAKTORY_DAEMON_API_KEY`.
+
 ### Policy: prune
 
 Runs on interval. For each user+namespace, calls `faktory.Prune()` with the configured criteria. Logs what was pruned.
@@ -204,6 +215,126 @@ When a user has >N summaries, merge the oldest ones into a single summary. Requi
 
 ---
 
+## Security
+
+### Threat model
+
+The daemon is a network service wrapping a memory store. Three threat categories matter:
+
+**1. Memory poisoning (paper's #1 open problem)**
+
+A client (malicious or buggy agent) injects false facts that persist and influence future agent decisions. Example: agent A writes "user cancelled their subscription" when they didn't. Agent B reads this and acts on it.
+
+Mitigations in v1:
+- **Namespace isolation** — each agent writes to its own namespace. Agent A cannot write to agent B's namespace. Cross-namespace reads are allowed (read is safe), cross-namespace writes are blocked by config.
+- **Write audit log** — every Add() is already tracked in `fact_history` with timestamps. Who wrote what is reconstructible.
+- **Confidence filtering** — consumers use `MinConfidence` in Recall to skip low-confidence facts. Poisoned facts from inferred sources get filtered.
+
+Not in v1 (future):
+- Per-namespace API keys (agent identity)
+- Fact provenance tracking (which API key wrote this fact)
+- Anomaly detection (sudden spike in contradictions for a user)
+
+**2. Unauthorized access**
+
+Without auth, anyone on the network can read/write all memory.
+
+Mitigations in v1:
+- **API key auth** — single shared key, configured in TOML or env var. All requests must send `Authorization: Bearer <key>`. Simple but sufficient for internal networks.
+- **Listen address** — default `127.0.0.1:8420` (localhost only). Explicit config required to bind to `0.0.0.0`.
+
+```toml
+[daemon]
+listen = "127.0.0.1:8420"   # localhost only by default
+api_key = "sk-daemon-..."    # required if set, all requests must include it
+```
+
+Not in v1:
+- Per-agent API keys with namespace-scoped permissions
+- mTLS
+- OAuth / JWT
+
+**3. Input validation**
+
+The HTTP layer is the system boundary — all input must be validated before reaching faktory.
+
+Rules:
+- `user_id` — required, max 256 chars, alphanumeric + `-_:.` only
+- `namespace` — optional, same charset as user_id, max 128 chars
+- `messages` — required for Add, array of `{role, content}`, max 100 messages, max 200K chars total
+- `query` — required for Recall/Search, max 10K chars
+- `limit` — optional int, clamped to 1-1000
+- Request body — max 1MB. Reject larger.
+
+faktory uses parameterized SQL queries (no injection risk), but the daemon should reject garbage before it reaches the library.
+
+**4. Secrets**
+
+- LLM API key in config or env var. Never logged, never in responses, never in error messages.
+- Config file should be 0600 permissions. Daemon logs a warning if it's world-readable.
+
+### What we accept
+
+- No encryption at rest (SQLite file is plaintext). Use OS-level disk encryption if needed.
+- No TLS in the daemon itself. Put it behind a reverse proxy for TLS.
+- No per-user encryption. All facts for all users are in the same DB with the same access.
+
+---
+
+## Extensibility
+
+### What's customizable
+
+- **Lifecycle policies** — configured via TOML. Add new policies by adding a `[policies.X]` section with `enabled`, `interval`, and policy-specific fields. Policy logic lives in `policies.go` — one function per policy.
+- **Custom prompts** — faktory's `PromptFactExtraction`, `PromptReconciliation`, `PromptEntityExtraction` are exposed as TOML config fields. The daemon passes them through to `faktory.Config`.
+- **LLM provider** — any OpenAI-compatible endpoint via `llm_base_url` config field.
+
+### What's NOT customizable
+
+- **HTTP handlers** — no middleware hooks, no plugin system. Fork to change.
+- **Storage** — SQLite only. faktory's design constraint.
+- **Custom endpoints** — no dynamic route registration. Add them in `server.go`.
+
+### Extension pattern
+
+The daemon is small enough that forking is the extension mechanism. If you need custom behavior:
+1. Copy `cmd/faktory-daemon/` to your repo
+2. Import `github.com/sderosiaux/faktory`
+3. Modify `server.go` and `policies.go`
+
+No plugin interfaces. No hook system. The code IS the configuration.
+
+---
+
+## Dependencies
+
+### Go modules
+
+| Dependency | Purpose | Why this one |
+|---|---|---|
+| `github.com/sderosiaux/faktory` | Memory library | This project. The whole point. |
+| `net/http` (stdlib) | HTTP server | No framework needed for ~10 routes. |
+| `github.com/BurntSushi/toml` | Config parsing | Already used by faktory CLI. Small, stable. |
+| `log/slog` (stdlib) | Structured logging | Already used by faktory. |
+
+That's it. No web framework. No DI container. No ORM. No metrics library.
+
+### Why no web framework
+
+10 routes. Each handler is: parse JSON body → call `faktory.Memory` method → serialize response. A framework adds dependency weight for zero value. `net/http` + `encoding/json` is enough.
+
+### Why no Prometheus / OpenTelemetry
+
+Counters are `atomic.Int64` fields on a struct. `GET /v1/stats` serializes them to JSON. If someone needs Prometheus, they write a scraper that hits `/v1/stats` — or they fork and add `promhttp`. Not a core dependency.
+
+### System dependencies
+
+- Go 1.21+ (for slog)
+- CGO enabled (for sqlite-vec, inherited from faktory)
+- SQLite3 headers (inherited from faktory)
+
+---
+
 ## Decisions
 
 | Decision | Rationale | Reversible? |
@@ -212,7 +343,8 @@ When a user has >N summaries, merge the oldest ones into a single summary. Requi
 | Single process | SQLite is single-writer. One daemon = one DB. Simple. | Hard (requires different storage) |
 | TOML config | Matches faktory CLI. Humans read it. | Yes |
 | All POST for writes | POST for mutations, GET for reads. REST-ish without being pedantic. | Yes |
-| No auth | First version. Add API key auth if someone deploys it publicly. | Yes |
+| Shared API key auth | Single key, not per-agent. Enough for internal networks. Per-agent keys are v2. | Yes |
+| Localhost default | Bind 127.0.0.1 unless explicitly configured. Security by default. | Yes |
 | No agent identity | Namespace isolation is enough. Agent identity is a layer on top. | Yes |
 | Counters not histograms | Simple integer counters. No Prometheus dependency. | Yes (add prom later) |
 | No rate limiting | Single-process, trusted network. | Yes |
@@ -224,6 +356,9 @@ When a user has >N summaries, merge the oldest ones into a single summary. Requi
 ### In (v1)
 
 - HTTP API for all faktory operations (add, recall, search, prune, profile, facts, relations, delete)
+- Shared API key auth (optional, recommended)
+- Input validation on all endpoints (user_id, namespace, body size)
+- Namespace-scoped write isolation
 - Background prune policy on interval
 - Background consolidation on threshold
 - Health and stats endpoints
@@ -235,7 +370,7 @@ When a user has >N summaries, merge the oldest ones into a single summary. Requi
 
 | Feature | Reason |
 |---|---|
-| Auth / API keys | Trusted network first. Add later. |
+| Per-agent API keys | Shared key is enough for v1. Per-agent with namespace ACLs is v2. |
 | Agent identity / attribution | Namespaces suffice. |
 | Summary compaction | Needs design. Future policy. |
 | Hierarchical consolidation | Research territory. |
