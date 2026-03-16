@@ -1,33 +1,33 @@
 # Future Tasks
 
-## Custom Prompts
+## ~~Custom Prompts~~ (done — R5)
 
-Let developers override the LLM prompts used for fact extraction, reconciliation, and entity extraction via Config fields. This enables domain-specific tuning without forking the library.
-
-**Fields to add to Config:**
-- `PromptFactExtraction string` — override the system prompt for extracting facts from conversation
-- `PromptReconciliation string` — override the system prompt for reconciling new facts against existing ones
-- `PromptEntityExtraction string` — override the system prompt for extracting entities and relations
-
-**Behavior:** When set, use the custom prompt instead of the default. When empty, fall back to the hardcoded prompts in `prompts.go`.
-
-**Scope:** Config-only change + prompt selection logic in `memory.go`. No new interfaces needed.
+Shipped. `PromptFactExtraction`, `PromptReconciliation`, `PromptEntityExtraction` in Config.
 
 ---
 
-## Session / Namespace Scoping
+## ~~Session / Namespace Scoping~~ (done — R4)
 
-Add optional `session_id` or `namespace` to isolate memories by conversation, project, or tenant. Currently all facts for a `user_id` live in a single flat space — this adds a second dimension of isolation.
+Shipped. `WithNamespace()` per-call option on all methods.
 
-**Use cases:**
-- Customer support: isolate memories per ticket/conversation
-- Multi-tenant SaaS: isolate memories per tenant
-- Development: separate "work" vs "personal" memory spaces
+---
 
-**Design considerations:**
-- Add optional `Namespace string` to Add/Recall/Search options (not Config — it's per-call)
-- Default empty namespace = current behavior (no breaking change)
-- Schema: add `namespace TEXT DEFAULT ''` column to facts, entities, relations tables
-- Index on `(user_id, namespace)` for efficient queries
-- Recall/Search filter by namespace when provided
-- Export/Import respect namespace boundaries
+## Memory OS
+
+The memory layer becomes an agent runtime — managing lifecycle, access control, and multi-agent coordination.
+
+**Why:** arXiv:2512.13564 argues that as agents become autonomous, the memory system becomes the equivalent of a filesystem in an OS. faktory today is a library (single-agent, single-process). A Memory OS handles what happens when multiple agents share memory, when memory grows unbounded, and when facts need access control.
+
+**What it adds:**
+1. **Multi-agent shared memory** — multiple agents read/write with attributed writes and coordination
+2. **Access control** — namespace-level read/write permissions per agent identity
+3. **Automatic lifecycle policies** — scheduled pruning, consolidation triggers, summary compaction
+4. **Hierarchical consolidation** — facts → session summaries → topic clusters → user abstractions
+5. **Memory health metrics** — growth rate, hit rate, staleness distribution, contradiction rate
+
+**Prerequisites:**
+- Prune() stable and battle-tested (done — R8)
+- Auto-consolidation working (done — R8)
+- Real deployment usage patterns to inform design
+
+**Full spec:** `docs/plans/memory-os.md`
