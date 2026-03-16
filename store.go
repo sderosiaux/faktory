@@ -434,6 +434,81 @@ func (s *Store) BumpAccess(ids []string) error {
 	return tx.Commit()
 }
 
+// PruneFacts finds facts matching the prune criteria. If dryRun is false,
+// soft-deletes them (sets invalid_at, removes embeddings).
+func (s *Store) PruneFacts(userID, namespace string, opts PruneOptions) ([]Fact, error) {
+	var conditions []string
+	var args []any
+
+	conditions = append(conditions, "user_id = ?", "namespace = ?", "invalid_at IS NULL", "is_summary = 0")
+	args = append(args, userID, namespace)
+
+	if opts.MaxAge > 0 {
+		cutoff := time.Now().Add(-opts.MaxAge).UTC().Format(time.RFC3339Nano)
+		conditions = append(conditions, "created_at < ?")
+		args = append(args, cutoff)
+	}
+	if opts.MinImportance > 0 {
+		conditions = append(conditions, "importance <= ?")
+		args = append(args, opts.MinImportance)
+	}
+	if opts.MaxAccessCount == -1 {
+		conditions = append(conditions, "access_count = 0")
+	} else if opts.MaxAccessCount > 0 {
+		conditions = append(conditions, "access_count <= ?")
+		args = append(args, opts.MaxAccessCount)
+	}
+
+	where := strings.Join(conditions, " AND ")
+	query := fmt.Sprintf("SELECT id, user_id, text, hash, created_at, updated_at, access_count, importance, source, confidence FROM facts WHERE %s ORDER BY importance ASC, access_count ASC, created_at ASC", where)
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var facts []Fact
+	for rows.Next() {
+		var f Fact
+		if err := rows.Scan(&f.ID, &f.UserID, &f.Text, &f.Hash, &f.CreatedAt, &f.UpdatedAt, &f.AccessCount, &f.Importance, &f.Source, &f.Confidence); err != nil {
+			return nil, err
+		}
+		facts = append(facts, f)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	if opts.DryRun || len(facts) == 0 {
+		return facts, nil
+	}
+
+	// Soft-delete: set invalid_at, remove embeddings
+	ts := now()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	for _, f := range facts {
+		if _, err := tx.Exec("UPDATE facts SET invalid_at = ? WHERE id = ?", ts, f.ID); err != nil {
+			return nil, fmt.Errorf("soft-delete fact %s: %w", f.ID, err)
+		}
+		if _, err := tx.Exec("DELETE FROM fact_embeddings WHERE id = ?", f.ID); err != nil {
+			return nil, fmt.Errorf("delete embedding %s: %w", f.ID, err)
+		}
+		if _, err := tx.Exec(
+			"INSERT INTO fact_history (id, fact_id, user_id, namespace, event, old_text, old_hash, created_at) VALUES (?, ?, ?, ?, 'DELETE', ?, ?, ?)",
+			newID(), f.ID, f.UserID, namespace, f.Text, f.Hash, ts); err != nil {
+			return nil, fmt.Errorf("record prune history %s: %w", f.ID, err)
+		}
+	}
+
+	return facts, tx.Commit()
+}
+
 // CountFacts returns the total number of facts for a user+namespace.
 func (s *Store) CountFacts(userID, namespace string) (int, error) {
 	var count int

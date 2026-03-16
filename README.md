@@ -50,6 +50,30 @@ That's it. faktory handles fact extraction, contradiction resolution, entity gra
 
 **Multi-tenant SaaS** — Isolate memories per tenant with `WithNamespace(tenantID)`. Same user_id, completely separate memory spaces.
 
+## Experiential memory (agent learning)
+
+faktory stores facts about users, but agents also need to remember their own experiences — errors, successful strategies, corrections. Use namespaces to separate agent experience from user facts:
+
+```go
+// After a task fails, record the experience
+mem.Add(ctx, []faktory.Message{
+    {Role: "user", Content: "task: fix auth bug\nerror: missing import\nfix: added 'import auth' to handler.go"},
+}, agentID, faktory.WithNamespace("agent-errors"))
+
+// After a task succeeds, record the pattern
+mem.Add(ctx, []faktory.Message{
+    {Role: "user", Content: "task: create REST endpoint\nsteps: create controller, add service, add test\nresult: success"},
+}, agentID, faktory.WithNamespace("agent-playbooks"))
+
+// Before starting a similar task, recall past experiences
+recall, _ := mem.Recall(ctx, "fix auth bug", agentID, &faktory.RecallOptions{
+    Namespace: "agent-errors",
+})
+// recall.Summary contains relevant past errors and fixes
+```
+
+The same memory primitives (extraction, reconciliation, search, decay) work for experiential memory. Namespace isolation keeps agent experience separate from user facts. Use `PromptFactExtraction` in Config to tune extraction for your experience format.
+
 ## Install
 
 ```bash
@@ -122,6 +146,18 @@ mem.DeleteAll(ctx, "alice")              // all facts, entities, relations, prof
 mem.DeleteAll(ctx, "alice", faktory.WithNamespace("work")) // only the "work" namespace
 mem.Export(ctx, "alice", writer)          // JSONL backup
 mem.Import(ctx, "alice", reader)         // restore from JSONL
+
+// Prune old, low-value facts to prevent memory explosion
+result, _ := mem.Prune(ctx, "alice", faktory.PruneOptions{
+    MaxAge:         90 * 24 * time.Hour, // older than 90 days
+    MinImportance:  2,                    // importance <= 2
+    MaxAccessCount: 1,                    // accessed at most once
+    DryRun:         true,                 // preview first
+})
+// result.Pruned contains facts that would be removed; set DryRun: false to delete
+
+// Session summary (manual)
+mem.Summarize(ctx, messages, "alice")    // generates and stores a session summary
 ```
 
 ## How it works
@@ -174,6 +210,8 @@ faktory.Config{
     PromptEntityExtraction: "",  // entity + relation extraction (empty = default)
 
     EnableQualifiers: false, // extract source/confidence metadata per fact (default off)
+
+    ConsolidateThreshold: 0, // auto-summarize in Add() when fact count exceeds this (0 = off)
 }
 ```
 
@@ -248,6 +286,8 @@ Tools: `memory_add`, `memory_recall`, `memory_search`, `memory_profile`, `memory
 - **256-dim default** — text-embedding-3-small supports Matryoshka truncation. 256 dimensions retain quality for short fact strings with 6x less storage. Override with `EmbedDimension: 1536` if needed
 - **Namespace scoping** — Per-call `WithNamespace()` adds a second isolation dimension beyond user_id
 - **Qualifier metadata over hyper-edges** — Research (10 arxiv papers) shows hyper-edges add only +1.5% retrieval accuracy while embedding qualifiers into vectors hurts performance. Instead, `source` and `confidence` are flat SQL columns on the facts table, enabling `WHERE confidence >= ?` filtering. Gated behind `EnableQualifiers` to keep extraction simple by default
+- **Soft-delete pruning** — `Prune()` sets `invalid_at` and removes embeddings but keeps the row for audit. Criteria: age, importance, access count. DryRun mode previews before deleting
+- **Auto-consolidation** — `ConsolidateThreshold` triggers `Summarize()` as a fire-and-forget goroutine when fact count exceeds the threshold after `Add()`. Failures are logged, never block the write path
 
 ## Testing
 

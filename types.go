@@ -118,6 +118,20 @@ func resolveOpts(opts []Option) callOptions {
 	return o
 }
 
+// PruneOptions configures the Prune() method.
+type PruneOptions struct {
+	MaxAge         time.Duration // delete facts older than this (0 = no age filter)
+	MinImportance  int           // only prune facts with importance <= this (0 = no filter)
+	MaxAccessCount int           // only prune facts accessed <= this many times (0 = no filter, -1 = exactly 0)
+	DryRun         bool          // if true, return what would be pruned without deleting
+}
+
+// PruneResult summarizes what Prune() did (or would do in DryRun mode).
+type PruneResult struct {
+	Pruned []Fact `json:"pruned"`
+	Count  int    `json:"count"`
+}
+
 // RecallOptions configures the Recall() method.
 type RecallOptions struct {
 	MaxFacts       int    `json:"max_facts,omitempty"`
@@ -180,6 +194,8 @@ type Config struct {
 	PromptEntityExtraction string // Override entity extraction system prompt
 
 	EnableQualifiers bool // Enable source/confidence qualifier extraction and filtering
+
+	ConsolidateThreshold int // Auto-summarize session when TotalFacts exceeds this after Add() (0 = disabled)
 }
 
 const defaultHTTPTimeout = 30 * time.Second
